@@ -28,6 +28,7 @@ import android.util.Log;
 import com.hmdm.launcher.Const;
 import com.hmdm.launcher.helper.SettingsHelper;
 import com.hmdm.launcher.json.ServerConfig;
+import com.hmdm.launcher.pro.ProUtils;
 
 public class ScreenOffReceiver extends BroadcastReceiver {
     @Override
@@ -35,7 +36,8 @@ public class ScreenOffReceiver extends BroadcastReceiver {
         Log.d(Const.LOG_TAG, "Screen off");
         SettingsHelper settingsHelper = SettingsHelper.getInstance(context);
         ServerConfig config = settingsHelper.getConfig();
-        if (config != null && config.getKioskScreenOn() != null && config.getKioskScreenOn()) {
+        if (config != null && config.getKioskScreenOn() != null && config.getKioskScreenOn() &&
+                ProUtils.isKioskModeRunning(context)) {
             Log.d(Const.LOG_TAG, "Turning the screen back on");
             PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
             if (pm != null) {
