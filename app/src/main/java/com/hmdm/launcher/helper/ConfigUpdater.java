@@ -1076,6 +1076,27 @@ public class ConfigUpdater {
                                             }
                                         }
                                     }
+                                    // Launch app immediately only for background updates.
+                                    // In foreground updates, MainActivity handles delayed autorun via applicationsForRun.
+                                    ServerConfig config = settingsHelper.getConfig();
+                                    if (uiNotifier == null && config != null && config.getApplications() != null) {
+                                        for (Application app : config.getApplications()) {
+                                            if (app.getPkg() != null && app.getPkg().equals(packageName) && app.isRunAfterInstall()) {
+                                                Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(packageName);
+                                                if (launchIntent != null) {
+                                                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                                                    try {
+                                                        context.startActivity(launchIntent);
+                                                        RemoteLogger.log(context, Const.LOG_INFO, "Launched app after install: " + packageName);
+                                                    } catch (Exception e) {
+                                                        RemoteLogger.log(context, Const.LOG_WARN, "Failed to launch app after install: " + e.getMessage());
+                                                        e.printStackTrace();
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
                                     if (uiNotifier != null) {
                                         uiNotifier.onAppInstallComplete(packageName);
                                     }
