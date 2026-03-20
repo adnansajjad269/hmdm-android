@@ -104,6 +104,7 @@ public class Const {
     public static final String QR_CUSTOMER_ATTR = "com.hmdm.CUSTOMER";
     public static final String QR_CONFIG_ATTR = "com.hmdm.CONFIG";
     public static final String QR_GROUP_ATTR = "com.hmdm.GROUP";
+    public static final String SKIP_INTRO_ATTR = "com.hmdm.SKIP_INTRO";
     public static final String QR_OPEN_WIFI_ATTR = "com.hmdm.OPEN_WIFI";
     public static final String QR_WORK_PROFILE_ATTR = "com.hmdm.WORK_PROFILE";
     public static final String QR_CERTS_ATTR = "com.hmdm.CERTS";
