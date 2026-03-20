@@ -2,6 +2,7 @@ package com.hmdm.launcher.helper;
 
 import static android.content.Context.MODE_PRIVATE;
 
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
 import android.content.Context;
 import android.content.Intent;
@@ -241,6 +242,7 @@ public class Initializer {
     }
 
     // Used by InitialSetupActivity
+    @SuppressLint("MissingPermission")
     public static void applyEarlyNonInteractivePolicies(Context context, ServerConfig config) {
         if (config.getSystemUpdateType() != null &&
                 config.getSystemUpdateType() != ServerConfig.SYSTEM_UPDATE_DEFAULT &&
