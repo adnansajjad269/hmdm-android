@@ -124,7 +124,7 @@ public class GetServerConfigTask extends AsyncTask< Void, Integer, Integer > {
 
                 settingsHelper.updateConfig(serverConfig);
                 if (Utils.isDeviceOwner(context)) {
-                    AppRestrictionUpdater.updateAppRestrictions(context, serverConfig.getApplicationSettings());
+                    AppRestrictionUpdater.updateAppRestrictions(context, settingsHelper.getProcessedAppSettings());
                 }
 
                 // Device already created, erase the device creation options

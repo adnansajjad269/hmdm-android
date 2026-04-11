@@ -54,7 +54,7 @@ public class InitialSetupActivity extends BaseActivity implements ConfigUpdater.
 
         if (!configuring) {
             configuring = true;
-            configUpdater = new ConfigUpdater();
+            configUpdater = new ConfigUpdater(this);
             configUpdater.setLoadOnly(true);
             certUrls = settingsHelper.getCertUrls();
             if (certUrls != null) {

@@ -9,7 +9,12 @@ import android.os.Bundle;
 
 import com.hmdm.launcher.json.ApplicationSetting;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -17,14 +22,18 @@ import java.util.Map;
 public class AppRestrictionUpdater {
 
     @TargetApi(Build.VERSION_CODES.LOLLIPOP)
-    public static void updateAppRestrictions(Context context, List<ApplicationSetting> appSettings) {
+    public static void updateAppRestrictions(Context context, Map<String, ApplicationSetting> appSettings) {
         Map<String, Bundle> map = new HashMap<>();
 
-        for (ApplicationSetting setting : appSettings) {
+        for (ApplicationSetting setting : appSettings.values()) {
             Bundle bundle = map.get(setting.getPackageId());
             if (bundle == null) {
                 bundle = new Bundle();
                 map.put(setting.getPackageId(), bundle);
+            }
+            if (setting.getName().equals("managedConfig")) {
+                parseManagedConfig(bundle, setting.getValue());
+                continue;
             }
             String val = setting.getValue();
             Integer intVal = getIntValue(val);
@@ -54,6 +63,60 @@ public class AppRestrictionUpdater {
                 e.printStackTrace();
             }
         }
+    }
+
+    private static void parseManagedConfig(Bundle bundle, String str) {
+        try {
+            JSONObject json = new JSONObject(str);
+            parseManagedConfig(bundle, json);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void parseManagedConfig(Bundle bundle, JSONObject json) throws JSONException {
+        Iterator<String> keys = json.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            Object value = json.get(key);
+            if (value instanceof String) {
+                bundle.putString(key, (String)value);
+            } else if (value instanceof Integer) {
+                bundle.putInt(key, (int)value);
+            } else if (value instanceof Long) {
+                bundle.putLong(key, (int)value);
+            } else if (value instanceof Double) {
+                bundle.putFloat(key, (float)value);
+            } else if (value instanceof Boolean) {
+                bundle.putBoolean(key, (boolean)value);
+            } else if (value instanceof JSONObject) {
+                Bundle nested = new Bundle();
+                parseManagedConfig(nested, (JSONObject) value);
+                bundle.putBundle(key, nested);
+            } else if (value instanceof JSONArray) {
+                JSONArray array = (JSONArray)value;
+                if (array.length() > 0) {
+                    Object first = array.opt(0);
+                    if (first instanceof String) {
+                        String[] stringArray = new String[array.length()];
+                        for (int i = 0; i < array.length(); i++) {
+                            stringArray[i] = array.optString(i);
+                        }
+                        bundle.putStringArray(key, stringArray);
+                    } else if (first instanceof JSONObject) {
+                        Bundle[] bundleArray = new Bundle[array.length()];
+                        for (int i = 0; i < array.length(); i++) {
+                            Bundle nested = new Bundle();
+                            parseManagedConfig(nested, array.optJSONObject(i));
+                            bundleArray[i] = nested;
+                        }
+                        bundle.putParcelableArray(key, bundleArray);
+                    }
+                    // arrays of integers and booleans are not supported
+                }
+            }
+        }
+
     }
 
     private static String[] parseArray(String str) {

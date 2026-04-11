@@ -78,6 +78,7 @@ public class MdmChoiceSetupActivity extends AppCompatActivity {
                 return;
             }
             settingsHelper.setDeviceId(deviceId);
+            settingsHelper.setImei(DevicePolicyManager.EXTRA_PROVISIONING_IMEI);
         }
     }
 
@@ -86,10 +87,15 @@ public class MdmChoiceSetupActivity extends AppCompatActivity {
         super.onResume();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1 &&
-                provisioningExtrasBundle != null &&
-                (provisioningExtrasBundle.getString(Const.SKIP_INTRO_ATTR) != null ||
-                 provisioningExtrasBundle.getBoolean(Const.SKIP_INTRO_ATTR))) {
+                provisioningExtrasBundle != null) {
+            SettingsHelper settingsHelper = SettingsHelper.getInstance(this);
+            settingsHelper.setConnRetryCount(provisioningExtrasBundle.getInt(Const.CONN_RETRY_COUNT, Const.DEFAULT_CONN_RETRY_COUNT));
+            settingsHelper.setConnRetryDelay(provisioningExtrasBundle.getInt(Const.CONN_RETRY_DELAY, Const.DEFAULT_CONN_RETRY_DELAY));
+            if (provisioningExtrasBundle.getString(Const.SKIP_INTRO_ATTR) != null ||
+                    provisioningExtrasBundle.getBoolean(Const.SKIP_INTRO_ATTR)) {
                 continueSetup(null);
+
+            }
         }
     }
 

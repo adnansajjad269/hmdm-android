@@ -25,7 +25,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
-import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Environment;
 import android.util.Log;
@@ -56,8 +55,17 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class PushNotificationProcessor {
+    static ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            1, 4,
+            0L, TimeUnit.MILLISECONDS,
+            new LinkedBlockingQueue<>()
+    );
+
     public static void process(PushMessage message, Context context) {
         RemoteLogger.log(context, Const.LOG_INFO, "Got Push Message, type " + message.getMessageType());
         if (message.getMessageType().equals(PushMessage.TYPE_CONFIG_UPDATED)) {
@@ -76,19 +84,19 @@ public class PushNotificationProcessor {
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_UNINSTALL_APP)) {
             // Uninstall application
-            AsyncTask.execute(() -> uninstallApplication(context, message.getPayloadJSON()));
+            executor.execute(() -> uninstallApplication(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_DELETE_FILE)) {
             // Delete file
-            AsyncTask.execute(() -> deleteFile(context, message.getPayloadJSON()));
+            executor.execute(() -> deleteFile(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_DELETE_DIR)) {
             // Delete directory recursively
-            AsyncTask.execute(() -> deleteDir(context, message.getPayloadJSON()));
+            executor.execute(() -> deleteDir(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_PURGE_DIR)) {
             // Purge directory (delete all files recursively)
-            AsyncTask.execute(() -> purgeDir(context, message.getPayloadJSON()));
+            executor.execute(() -> purgeDir(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_PERMISSIVE_MODE)) {
             // Turn on permissive mode
@@ -97,11 +105,11 @@ public class PushNotificationProcessor {
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_RUN_COMMAND)) {
             // Run a command-line script
-            AsyncTask.execute(() -> runCommand(context, message.getPayloadJSON()));
+            executor.execute(() -> runCommand(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_REBOOT)) {
             // Reboot a device
-            AsyncTask.execute(() -> reboot(context));
+            executor.execute(() -> reboot(context));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_EXIT_KIOSK)) {
             // Temporarily exit kiosk mode
@@ -114,19 +122,19 @@ public class PushNotificationProcessor {
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_CLEAR_DOWNLOADS)) {
             // Clear download history
-            AsyncTask.execute(() -> clearDownloads(context));
+            executor.execute(() -> clearDownloads(context));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_INTENT)) {
             // Run a system intent (like settings or ACTION_VIEW)
-            AsyncTask.execute(() -> callIntent(context, message.getPayloadJSON()));
+            executor.execute(() -> callIntent(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_GRANT_PERMISSIONS)) {
             // Grant permissions to apps
-            AsyncTask.execute(() -> grantPermissions(context, message.getPayloadJSON()));
+            executor.execute(() -> grantPermissions(context, message.getPayloadJSON()));
             return;
         } else if (message.getMessageType().equals(PushMessage.TYPE_CLEAR_APP_DATA)) {
             // Clear application data
-            AsyncTask.execute(() -> clearAppData(context, message.getPayloadJSON()));
+            executor.execute(() -> clearAppData(context, message.getPayloadJSON()));
             return;
         }
 

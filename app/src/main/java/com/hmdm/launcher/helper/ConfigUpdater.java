@@ -91,7 +91,8 @@ public class ConfigUpdater {
     private List< Application > applicationsForRun = new LinkedList();
     private Map<String, File> pendingInstallations = new HashMap<String,File>();
     private BroadcastReceiver appInstallReceiver;
-    private boolean retry = true;
+    private int retryCount;
+    private int retryDelay;
     private boolean loadOnly = false;
     private boolean userInteraction;
 
@@ -106,7 +107,7 @@ public class ConfigUpdater {
                     sendBroadcast(new Intent(Const.ACTION_UPDATE_CONFIGURATION));
         } else {
             Log.d(Const.LOG_TAG, "Main activity is not running, creating a new ConfigUpdater");
-            new ConfigUpdater().updateConfig(context, null, false);
+            new ConfigUpdater(context).updateConfig(context, null, false);
         }
     }
 
@@ -115,7 +116,12 @@ public class ConfigUpdater {
     }
 
     public static void forceConfigUpdate(final Context context, final UINotifier notifier, final boolean userInteraction) {
-        new ConfigUpdater().updateConfig(context, notifier, userInteraction);
+        new ConfigUpdater(context).updateConfig(context, notifier, userInteraction);
+    }
+
+    public ConfigUpdater(Context context) {
+        retryCount = SettingsHelper.getInstance(context).getConnRetryCount();
+        retryDelay = SettingsHelper.getInstance(context).getConnRetryDelay() * 1000;
     }
 
     public void setLoadOnly(boolean loadOnly) {
@@ -167,15 +173,10 @@ public class ConfigUpdater {
                         break;
                     case Const.TASK_NETWORK_ERROR:
                         RemoteLogger.log(context, Const.LOG_WARN, "Failed to update config: network error");
-                        if (retry) {
-                            // Retry the request once because WiFi may not yet be initialized
-                            retry = false;
-                            handler.postDelayed(new Runnable() {
-                                @Override
-                                public void run() {
-                                    updateConfig(context, uiNotifier, userInteraction);
-                                }
-                            }, 15000);
+                        if (retryCount > 0) {
+                            // Retry the request because WiFi may not yet be initialized
+                            retryCount--;
+                            handler.postDelayed(() -> updateConfig(context, uiNotifier, userInteraction), retryDelay);
                         } else {
                             if (settingsHelper.getConfig() != null && !userInteraction) {
                                 if (uiNotifier != null && settingsHelper.getConfig().isShowWifi()) {

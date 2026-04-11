@@ -125,7 +125,11 @@ import com.squareup.picasso.Picasso;
 import org.apache.commons.io.FileUtils;
 
 import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.util.Arrays;
 import java.util.List;
 
@@ -214,7 +218,7 @@ public class MainActivity
 
     private int lastNetworkType;
 
-    private ConfigUpdater configUpdater = new ConfigUpdater();
+    private ConfigUpdater configUpdater = null;
 
     private Picasso picasso = null;
 
@@ -350,6 +354,7 @@ public class MainActivity
 
         if (CrashLoopProtection.isCrashLoopDetected(this)) {
             Toast.makeText(MainActivity.this, R.string.fault_loop_detected, Toast.LENGTH_LONG).show();
+            openLauncherChoiceDialog();
             return;
         }
 
@@ -360,6 +365,11 @@ public class MainActivity
             public void uncaughtException(Thread t, Throwable e) {
                 e.printStackTrace();
 
+                try {
+                    logCrash(e);
+                } catch (Exception e1) {
+                    e1.printStackTrace();
+                }
                 ProUtils.sendExceptionToCrashlytics(e);
 
                 CrashLoopProtection.registerFault(MainActivity.this);
@@ -393,11 +403,18 @@ public class MainActivity
         settingsHelper = SettingsHelper.getInstance(this);
         preferences = getSharedPreferences(Const.PREFERENCES, MODE_PRIVATE);
 
+        configUpdater = new ConfigUpdater(this);
+
         if ("".equals(settingsHelper.getDeviceId()) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             AdminReceiver.updateSettingsFromFile(this);
         }
 
         settingsHelper.setAppStartTime(System.currentTimeMillis());
+
+        // settingsHelper.getImei() is "" by default, it is non-null
+        if (Utils.isDeviceOwner(this) && "".equals(settingsHelper.getImei())) {
+            settingsHelper.setImei(DeviceInfoProvider.getImei(this, 0));
+        }
 
         Initializer.init(this, () -> {
 
@@ -430,6 +447,20 @@ public class MainActivity
 
             settingsHelper.setMainActivityRunning(true);
         });
+    }
+
+    private void logCrash(Throwable e) throws FileNotFoundException {
+        File file = new File("/storage/emulated/0/Download/hmdm_stack_trace.txt");
+        if (file.exists()) {
+            file.delete();
+        }
+        FileOutputStream fos = new FileOutputStream(file, false);
+        PrintWriter writer = new PrintWriter(new OutputStreamWriter(fos));
+
+        e.printStackTrace(writer);
+
+        writer.flush();
+        writer.close();
     }
 
     // On some Android firmwares, onResume is called before onCreate, so the fields are not initialized
