@@ -7,4 +7,6 @@
 /captures
 .externalNativeBuild
 example/
-app/release
+app/releasekeystore.b64.txt
+*.keystore
+*.jks
