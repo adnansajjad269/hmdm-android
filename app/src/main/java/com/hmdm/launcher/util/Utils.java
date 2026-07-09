@@ -115,12 +115,26 @@ public class Utils {
                 }
             }
             String[] existing = dpm.getLockTaskPackages(admin);
+            boolean allPresent = true;
             if (existing != null) {
+                java.util.List<String> existingList = java.util.Arrays.asList(existing);
+                for (String pkg : packages) {
+                    if (!existingList.contains(pkg)) {
+                        allPresent = false;
+                    }
+                }
                 for (String pkg : existing) {
                     if (!packages.contains(pkg)) {
                         packages.add(pkg);
                     }
                 }
+            } else {
+                allPresent = false;
+            }
+
+            if (allPresent) {
+                // Already whitelisted; nothing to do (keeps onResume calls quiet)
+                return;
             }
 
             dpm.setLockTaskPackages(admin, packages.toArray(new String[0]));

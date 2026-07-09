@@ -556,6 +556,13 @@ public class MainActivity
 
         isBackground = false;
 
+        // CUSTOM (fleet patch): retry lock-task whitelist on every resume.
+        // At first-boot onCreate, device-owner status may not yet be registered,
+        // so the onCreate call can hit the "not device owner" guard and skip.
+        // Calling here re-attempts until DO is present; the method is idempotent
+        // and returns immediately once the whitelist is in place.
+        Utils.applyLockTaskWhitelist(this);
+
         // On some Android firmwares, onResume is called before onCreate, so the fields are not initialized
         // Here we initialize all required fields to avoid crash at startup
         reinitApp();
