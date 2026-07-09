@@ -75,6 +75,62 @@ public class Utils {
         return dpm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && dpm.isDeviceOwnerApp(context.getPackageName());
     }
 
+    // ===================================================================
+    // CUSTOM (fleet patch): lock task whitelist for silent kiosk pinning
+    //
+    // Community Edition does not implement kiosk mode, so nothing calls
+    // DevicePolicyManager.setLockTaskPackages(). Apps that self-pin via
+    // startLockTask() (e.g. FreeKiosk) therefore fall into *screen pinning*,
+    // which shows a user-consent prompt; if that prompt is buried by the
+    // pinned app's immersive mode, the device is left in a consent-limbo
+    // state where taps are consumed system-side (frozen buttons).
+    //
+    // As device owner, whitelisting the package makes startLockTask() enter
+    // silent lock task instead: no toast, no consent prompt, no limbo, and
+    // the unpin gesture is disabled (stronger kiosk posture).
+    //
+    // The whitelist persists in the system's device policy across reboots;
+    // re-applying on every launcher start is an idempotent safety net.
+    // Add any other self-pinning kiosk apps to this array.
+    // ===================================================================
+    private static final String[] LOCK_TASK_EXTRA_PACKAGES = {
+            "com.freekiosk"
+    };
+
+    public static void applyLockTaskWhitelist(Context context) {
+        if (!isDeviceOwner(context)) {
+            Log.i(Const.LOG_TAG, "LockTaskWhitelist: not device owner, skipping");
+            return;
+        }
+        try {
+            DevicePolicyManager dpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+            ComponentName admin = LegacyUtils.getAdminComponentName(context);
+
+            // Merge: own package + extras + anything already whitelisted
+            List<String> packages = new ArrayList<String>();
+            packages.add(context.getPackageName());
+            for (String pkg : LOCK_TASK_EXTRA_PACKAGES) {
+                if (!packages.contains(pkg)) {
+                    packages.add(pkg);
+                }
+            }
+            String[] existing = dpm.getLockTaskPackages(admin);
+            if (existing != null) {
+                for (String pkg : existing) {
+                    if (!packages.contains(pkg)) {
+                        packages.add(pkg);
+                    }
+                }
+            }
+
+            dpm.setLockTaskPackages(admin, packages.toArray(new String[0]));
+            Log.i(Const.LOG_TAG, "LockTaskWhitelist: applied " + packages);
+        } catch (Exception e) {
+            // Never let policy application break launcher startup
+            Log.e(Const.LOG_TAG, "LockTaskWhitelist: failed to apply", e);
+        }
+    }
+
     // In the open source variant, there are no flavors, so by default it's "opensource"
     public static String getLauncherVariant() {
         return BuildConfig.FLAVOR == null || BuildConfig.FLAVOR.equals("") ? "opensource" : BuildConfig.FLAVOR;

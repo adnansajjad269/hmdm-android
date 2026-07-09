@@ -421,6 +421,10 @@ public class MainActivity
             settingsHelper.setImei(DeviceInfoProvider.getImei(this, 0));
         }
 
+        // CUSTOM (fleet patch): whitelist self-pinning kiosk apps for silent
+        // lock task. Idempotent; persists in device policy. See Utils.
+        Utils.applyLockTaskWhitelist(this);
+
         Initializer.init(this, () -> {
 
             // Try to start services in onCreate(), this may fail, we will try again on each onResume.
