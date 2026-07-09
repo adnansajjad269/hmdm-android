@@ -1,0 +1,80 @@
+name: Build Headwind Launcher (LockTask Whitelist)
+
+# Builds the patched hmdm-android launcher, signed with YOUR fleet keystore.
+#
+# CRITICAL - READ BEFORE FIRST RUN:
+# This APK will be installed as DEVICE OWNER during re-enrollment. Android only
+# accepts updates to a device-owner app signed with the SAME key. If this
+# keystore is ever lost, the entire fleet must be factory-reset again to take
+# any future launcher update. Back the keystore up in at least two places
+# (password manager + offline copy) before enrolling the first device.
+#
+# Required repository secrets (same pattern as the FreeKiosk workflow):
+#   KEYSTORE_BASE64       - base64 of your .jks/.keystore file
+#   KEYSTORE_PASSWORD
+#   KEY_ALIAS
+#   KEY_PASSWORD
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (patch already committed to main)
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Verify the whitelist patch is present
+        run: |
+          set -e
+          grep -q "applyLockTaskWhitelist" app/src/main/java/com/hmdm/launcher/util/Utils.java
+          grep -q "applyLockTaskWhitelist" app/src/main/java/com/hmdm/launcher/ui/MainActivity.java
+          grep -q "com.freekiosk" app/src/main/java/com/hmdm/launcher/util/Utils.java
+          echo "Patch verified in source."
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > $GITHUB_WORKSPACE/fleet.keystore
+
+      - name: Build release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/fleet.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Sign APK (apksigner, in case project has no signingConfig)
+        run: |
+          set -e
+          BUILD_TOOLS=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
+          # Find the unsigned or release APK produced by the build
+          APK=$(find app/build/outputs/apk -name "*.apk" | grep -iE "release" | head -1)
+          echo "Signing: $APK"
+          "$APKSIGNER" sign \
+            --ks "$GITHUB_WORKSPACE/fleet.keystore" \
+            --ks-pass pass:"${{ secrets.KEYSTORE_PASSWORD }}" \
+            --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+            --key-pass pass:"${{ secrets.KEY_PASSWORD }}" \
+            --out hmdm-launcher-locktask-signed.apk \
+            "$APK"
+          "$APKSIGNER" verify --print-certs hmdm-launcher-locktask-signed.apk | head -5
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hmdm-launcher-locktask-signed
+          path: hmdm-launcher-locktask-signed.apk
