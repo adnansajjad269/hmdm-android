@@ -144,13 +144,65 @@ public class InstallUtils {
                     }
                 }
             } catch ( PackageManager.NameNotFoundException e ) {
-                // The app isn't installed, let's keep it in the "To be installed" list
+                // The app isn't installed as a normal package. It may still be installed as a
+                // static shared library (e.g. com.google.android.trichromelibrary), which
+                // getPackageInfo() cannot see. Consult the shared-library table as a fallback.
                 if (application.isRemove()) {
-                    // The app requires removal but already removed, remove from the list so do nothing with the app
+                    // The app requires removal but already removed as a normal package.
+                    // Static-shared-library removal needs the mangled package name and is not
+                    // supported here, so behaviour is unchanged: nothing to remove.
                     Log.d(Const.LOG_TAG, "checkAndUpdateApplications(): app " + application.getPkg() + " not found, nothing to remove");
                     it.remove();
                     continue;
                 }
+
+                Long installedLibVersion = StaticLibUtils.getInstalledStaticLibVersion(context, application.getPkg());
+                if (installedLibVersion == null) {
+                    // Not installed as a package nor as a static library: keep it in the
+                    // "To be installed" list (today's behaviour).
+                    continue;
+                }
+
+                // Installed as a static shared library. Dump the library table once so the
+                // on-device version can be cross-checked against "adb shell pm list libraries".
+                StaticLibUtils.dumpSharedLibraries(context);
+
+                if (application.isSkipVersion() || application.getVersion() == null || application.getVersion().equals("0")) {
+                    // Presence alone is enough (mirrors the normal-package semantics above)
+                    Log.d(Const.LOG_TAG, "checkAndUpdateApplications(): static lib " + application.getPkg()
+                            + " already installed (version check skipped), skipping");
+                    it.remove();
+                    continue;
+                }
+
+                if (application.getCode() != null && application.getCode() != 0) {
+                    // The server config carries the target version code (parsed from the
+                    // uploaded APK), so we can compare like-for-like against the installed
+                    // static-library version code.
+                    long requiredCode = application.getCode();
+                    if (installedLibVersion >= requiredCode) {
+                        RemoteLogger.log(context, Const.LOG_DEBUG, "Static lib " + application.getPkg()
+                                + " installed (version code " + installedLibVersion + " >= required "
+                                + requiredCode + "), skipping install");
+                        it.remove();
+                        continue;
+                    } else {
+                        RemoteLogger.log(context, Const.LOG_DEBUG, "Static lib " + application.getPkg()
+                                + " upgrade required (installed version code " + installedLibVersion
+                                + " < required " + requiredCode + ")");
+                        // Keep in the "To be installed" list to perform the upgrade
+                        continue;
+                    }
+                }
+
+                // No version code in the config (e.g. an app configured via an external URL
+                // the server never parsed). Fall back to presence-only detection and say so
+                // loudly: upgrades in this case must be triggered by a deliberate change.
+                RemoteLogger.log(context, Const.LOG_WARN, "Static lib " + application.getPkg()
+                        + " installed but server config carries no version code; using presence-only "
+                        + "detection and skipping install. A deliberate reinstall is needed to upgrade.");
+                it.remove();
+                continue;
             }
         }
     }

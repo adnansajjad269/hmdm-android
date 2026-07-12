@@ -40,6 +40,7 @@ import com.hmdm.launcher.task.GetRemoteLogConfigTask;
 import com.hmdm.launcher.task.GetServerConfigTask;
 import com.hmdm.launcher.util.DeviceInfoProvider;
 import com.hmdm.launcher.util.InstallUtils;
+import com.hmdm.launcher.util.PlayProtectUtils;
 import com.hmdm.launcher.util.PushNotificationMqttWrapper;
 import com.hmdm.launcher.util.RemoteLogger;
 import com.hmdm.launcher.util.SystemUtils;
@@ -750,6 +751,13 @@ public class ConfigUpdater {
         configInitializing = false;
 
         ServerConfig config = settingsHelper.getConfig();
+
+        // Apply the (optional, off-by-default) Play Protect suppression before installing apps,
+        // so a factory-default device doesn't raise the verifier prompt during silent install.
+        // Gated by the server-managed "playProtectMode" app setting on the launcher's package.
+        PlayProtectUtils.applyMode(context,
+                settingsHelper.getAppPreference(context.getPackageName(), PlayProtectUtils.PREF_KEY));
+
         InstallUtils.generateApplicationsForInstallList(context, config.getApplications(), applicationsForInstall, pendingInstallations);
 
         Log.i(Const.LOG_TAG, "checkAndUpdateApplications(): list size=" + applicationsForInstall.size());
