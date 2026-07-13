@@ -97,38 +97,7 @@ public class DeviceInfoProvider {
                             applications.add(installedApp);
                         }
                     } catch (PackageManager.NameNotFoundException e) {
-                        // Not installed as a normal package. It may be installed as a static
-                        // shared library (e.g. Trichrome), which getPackageInfo() cannot see.
-                        // Report it via the shared-library table so it shows up in the server's
-                        // Installation Status.
-                        Long libVersion = StaticLibUtils.getInstalledStaticLibVersion(context, application.getPkg());
-                        if (libVersion != null) {
-                            Application installedApp = new Application();
-                            installedApp.setName(application.getName());
-                            installedApp.setPkg(application.getPkg());
-                            // Report the config's version name when the installed static-library
-                            // version code matches the config's version code (the code uniquely
-                            // identifies the version), so Installation Status displays cleanly.
-                            // Otherwise report the raw version code as the version string.
-                            if (application.getCode() != null && application.getCode() != 0
-                                    && libVersion == application.getCode().longValue()
-                                    && application.getVersion() != null) {
-                                installedApp.setVersion(application.getVersion());
-                            } else {
-                                installedApp.setVersion(String.valueOf(libVersion));
-                            }
-
-                            boolean appPresents = false;
-                            for (Application a : applications) {
-                                if (a.getPkg().equalsIgnoreCase(installedApp.getPkg())) {
-                                    appPresents = true;
-                                    break;
-                                }
-                            }
-                            if (!appPresents) {
-                                applications.add(installedApp);
-                            }
-                        }
+                        // Application not installed
                     }
                 }
 

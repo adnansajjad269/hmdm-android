@@ -9,8 +9,11 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.location.LocationManager;
 import android.net.ConnectivityManager;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.IBinder;
+import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
@@ -18,6 +21,7 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import com.hmdm.launcher.Const;
 import com.hmdm.launcher.helper.SettingsHelper;
 import com.hmdm.launcher.json.ServerConfig;
+import com.hmdm.launcher.util.RemoteLogger;
 import com.hmdm.launcher.util.Utils;
 
 import java.util.Timer;
@@ -34,7 +38,22 @@ public class StatusControlService extends Service {
 
     private final long ENABLE_CONTROL_DELAY = 60;
 
-    private final long STATUS_CHECK_INTERVAL_MS = 10000;
+    // Interval for the policy re-assertion tick (Bluetooth/WiFi enforce, GPS/mobile-data
+    // violation broadcasts). This is enforcement latency only; a longer interval saves battery.
+    // Overridable per-config via the "statusCheckIntervalSec" app preference, clamped to
+    // [MIN, MAX]. Default raised from 10s to 30s to cut always-on wakeups to ~1/3.
+    private final long DEFAULT_STATUS_CHECK_INTERVAL_MS = 30000;
+    private final long MIN_STATUS_CHECK_INTERVAL_MS = 10000;
+    private final long MAX_STATUS_CHECK_INTERVAL_MS = 600000;
+
+    // The redacted BSSID Android returns when location permission/services are unavailable.
+    private static final String REDACTED_BSSID = "02:00:00:00:00:00";
+    // Marker prefix so a single narrow server log rule can capture only these roam events.
+    private static final String BSSID_LOG_MARKER = "WIFI_BSSID_CHANGED";
+
+    // Last observed WiFi BSSID (AP MAC), for detecting roams including same-SSID AP changes.
+    private String lastBssid = null;
+    private BroadcastReceiver wifiStateReceiver;
 
     private static class PackageInfo {
         public String packageName;
@@ -64,12 +83,107 @@ public class StatusControlService extends Service {
     public void onDestroy() {
         LocalBroadcastManager.getInstance( this ).unregisterReceiver( receiver );
 
+        unregisterWifiStateReceiver();
+
         threadPoolExecutor.shutdownNow();
         threadPoolExecutor = new ScheduledThreadPoolExecutor( 1 );
 
         Log.i(Const.LOG_TAG, "StatusControlService: service stopped");
 
         super.onDestroy();
+    }
+
+    // Battery-friendly WiFi BSSID-change detection: event-driven (no polling). The OS only
+    // delivers NETWORK_STATE_CHANGED on real association/roam events, and a runtime-registered
+    // receiver is exempt from the Android 8+ manifest implicit-broadcast limits.
+    private void registerWifiStateReceiver() {
+        if (wifiStateReceiver != null) {
+            return;
+        }
+        wifiStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                handleWifiStateChange();
+            }
+        };
+        try {
+            IntentFilter filter = new IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                registerReceiver(wifiStateReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(wifiStateReceiver, filter);
+            }
+            // Prime the baseline silently so only subsequent real roams are logged.
+            lastBssid = readCurrentBssid();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void unregisterWifiStateReceiver() {
+        if (wifiStateReceiver != null) {
+            try {
+                unregisterReceiver(wifiStateReceiver);
+            } catch (Exception e) {
+                // Already unregistered
+            }
+            wifiStateReceiver = null;
+        }
+    }
+
+    // Returns the current connected BSSID (AP MAC), or null if not connected or the value is
+    // redacted (no location permission/services — Android returns 02:00:00:00:00:00 then).
+    @SuppressLint("MissingPermission")
+    private String readCurrentBssid() {
+        try {
+            WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager == null) {
+                return null;
+            }
+            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+            String bssid = wifiInfo != null ? wifiInfo.getBSSID() : null;
+            if (bssid == null || bssid.isEmpty() || REDACTED_BSSID.equals(bssid)) {
+                return null;
+            }
+            return bssid;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    // If the BSSID changed to a valid AP MAC (including a same-SSID roam), logs one timestamped
+    // INFO event. Relayed through the existing gated/batched RemoteLogger channel; a single narrow
+    // server log rule filtered to the marker uploads only these events.
+    @SuppressLint("MissingPermission")
+    private void handleWifiStateChange() {
+        try {
+            String bssid = readCurrentBssid();
+            if (bssid == null) {
+                // Not connected or BSSID redacted; keep the last known BSSID so a transient
+                // disconnect isn't logged as a roam.
+                return;
+            }
+            if (bssid.equals(lastBssid)) {
+                // No change
+                return;
+            }
+
+            lastBssid = bssid;
+            String ssid = null;
+            try {
+                WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                WifiInfo wifiInfo = wifiManager != null ? wifiManager.getConnectionInfo() : null;
+                ssid = wifiInfo != null ? wifiInfo.getSSID() : null;
+            } catch (Exception e) {
+                // SSID is best-effort context only
+            }
+            RemoteLogger.log(this, Const.LOG_INFO, BSSID_LOG_MARKER + " " + bssid
+                    + (TextUtils.isEmpty(ssid) ? "" : " ssid=" + ssid));
+        } catch (Exception e) {
+            // A WiFi/permission error must never crash the service
+            e.printStackTrace();
+        }
     }
 
     @Override
@@ -86,11 +200,37 @@ public class StatusControlService extends Service {
 
         threadPoolExecutor.shutdownNow();
 
+        long intervalMs = resolveStatusCheckInterval();
         threadPoolExecutor = new ScheduledThreadPoolExecutor(1);
         threadPoolExecutor.scheduleWithFixedDelay(() -> controlStatus(),
-                STATUS_CHECK_INTERVAL_MS, STATUS_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+                intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+
+        registerWifiStateReceiver();
 
         return Service.START_STICKY;
+    }
+
+    // Resolve the tick interval: default DEFAULT_STATUS_CHECK_INTERVAL_MS, overridable per-config
+    // via the "statusCheckIntervalSec" app preference, clamped to [MIN, MAX]. Any bad value falls
+    // back to the default.
+    private long resolveStatusCheckInterval() {
+        long intervalMs = DEFAULT_STATUS_CHECK_INTERVAL_MS;
+        try {
+            String pref = settingsHelper.getAppPreference(getPackageName(), "statusCheckIntervalSec");
+            if (pref != null && !pref.trim().isEmpty()) {
+                long candidate = Long.parseLong(pref.trim()) * 1000L;
+                if (candidate < MIN_STATUS_CHECK_INTERVAL_MS) {
+                    candidate = MIN_STATUS_CHECK_INTERVAL_MS;
+                } else if (candidate > MAX_STATUS_CHECK_INTERVAL_MS) {
+                    candidate = MAX_STATUS_CHECK_INTERVAL_MS;
+                }
+                intervalMs = candidate;
+            }
+        } catch (Exception e) {
+            // Bad preference value: keep the default
+        }
+        Log.i(Const.LOG_TAG, "StatusControlService: status check interval = " + intervalMs + " ms");
+        return intervalMs;
     }
 
 
