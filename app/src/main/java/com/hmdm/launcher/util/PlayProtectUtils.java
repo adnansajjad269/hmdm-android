@@ -67,7 +67,9 @@ public class PlayProtectUtils {
      */
     public static void applyMode(Context context, String mode) {
         if (mode == null || mode.trim().equals("")) {
-            mode = MODE_OFF;
+            // Fleet-wide default: suppress Play Protect out of the box by hiding the verifier.
+            // Set the app preference playProtectMode=off in the web console to restore Play Store.
+            mode = MODE_HIDE_VERIFIER;
         }
         mode = mode.trim();
 

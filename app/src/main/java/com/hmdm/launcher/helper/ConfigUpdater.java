@@ -45,6 +45,7 @@ import com.hmdm.launcher.util.PushNotificationMqttWrapper;
 import com.hmdm.launcher.util.RemoteLogger;
 import com.hmdm.launcher.util.SystemUtils;
 import com.hmdm.launcher.util.Utils;
+import com.hmdm.launcher.util.WifiBssidTracker;
 
 import org.apache.commons.io.FileUtils;
 
@@ -141,6 +142,11 @@ public class ConfigUpdater {
         this.context = context;
         this.uiNotifier = uiNotifier;
         this.userInteraction = userInteraction;
+
+        // Doze-exempt reconcile: config updates run on MQTT pings / periodic wakes, so this
+        // catches a Wi-Fi BSSID switch that happened while the launcher was asleep (logged
+        // "(detected on wake)"). Live switches are caught by the receivers when the app is awake.
+        WifiBssidTracker.checkAndLog(context, false);
 
         // Work around a strange bug with stale SettingsHelper instance: re-read its value
         settingsHelper = SettingsHelper.getInstance(context.getApplicationContext());
@@ -697,8 +703,13 @@ public class ConfigUpdater {
             return true;
         }
         if (lastDownload.isDownloaded() && !lastDownload.isInstalled()) {
-            RemoteLogger.log(context, Const.LOG_INFO, "Skip download due to previous install failure: " + objectId);
-            return false;
+            if (retryFailedInstallEnabled()) {
+                // Retry the install each poll (the cached APK is reused, not re-downloaded).
+                RemoteLogger.log(context, Const.LOG_INFO, "Retrying install after previous failure: " + objectId);
+            } else {
+                RemoteLogger.log(context, Const.LOG_INFO, "Skip download due to previous install failure: " + objectId);
+                return false;
+            }
         }
         ServerConfig config = SettingsHelper.getInstance(context).getConfig();
         if ("limited".equals(config.getDownloadUpdates())) {
@@ -716,6 +727,22 @@ public class ConfigUpdater {
             }
         }
         return true;
+    }
+
+    // Whether to retry an app whose APK downloaded but the install failed. Default ON (the retry
+    // reuses the cached APK, so it doesn't re-download). Set the launcher app preference
+    // retryFailedInstall to 0/false/off to restore the old "skip after failure" behaviour.
+    private boolean retryFailedInstallEnabled() {
+        try {
+            String pref = settingsHelper.getAppPreference(context.getPackageName(), "retryFailedInstall");
+            if (pref == null) {
+                return true;
+            }
+            pref = pref.trim().toLowerCase();
+            return !(pref.equals("0") || pref.equals("false") || pref.equals("off"));
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     private void installCertificates() {
@@ -862,34 +889,47 @@ public class ConfigUpdater {
                         }
 
                         File file = null;
-                        try {
-                            RemoteLogger.log(context, Const.LOG_DEBUG, "Downloading app: " + application.getPkg());
-                            file = InstallUtils.downloadFile(context, application.getUrl(),
-                                    new InstallUtils.DownloadProgress() {
-                                        @Override
-                                        public void onDownloadProgress(final int progress, final long total, final long current) {
-                                            if (uiNotifier != null) {
-                                                uiNotifier.onDownloadProgress(progress, total, current);
-                                            }
-                                            /*
-                                            handler.post(new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    binding.progress.setMax(100);
-                                                    binding.progress.setProgress(progress);
 
-                                                    binding.setFileLength(total);
-                                                    binding.setDownloadedLength(current);
+                        // If the previous attempt downloaded the APK but the install failed,
+                        // reuse the cached file instead of re-downloading (potentially large) it.
+                        File cachedApk = new File(tempPath);
+                        if (retryFailedInstallEnabled() && lastDownload != null
+                                && lastDownload.isDownloaded() && !lastDownload.isInstalled()
+                                && cachedApk.exists()) {
+                            RemoteLogger.log(context, Const.LOG_INFO, "Reusing cached APK for retry: " + application.getPkg());
+                            file = cachedApk;
+                        }
+
+                        if (file == null) {
+                            try {
+                                RemoteLogger.log(context, Const.LOG_DEBUG, "Downloading app: " + application.getPkg());
+                                file = InstallUtils.downloadFile(context, application.getUrl(),
+                                        new InstallUtils.DownloadProgress() {
+                                            @Override
+                                            public void onDownloadProgress(final int progress, final long total, final long current) {
+                                                if (uiNotifier != null) {
+                                                    uiNotifier.onDownloadProgress(progress, total, current);
                                                 }
-                                            });
-                                             */
-                                        }
-                                    });
-                        } catch (Exception e) {
-                            RemoteLogger.log(context, Const.LOG_WARN, "Failed to download app " + application.getPkg() + ": " + e.getMessage());
-                            e.printStackTrace();
-                            // Save the download attempt in the database
-                            saveFailedAttempt(context, lastDownload, application.getUrl(), tempPath, false, false);
+                                                /*
+                                                handler.post(new Runnable() {
+                                                    @Override
+                                                    public void run() {
+                                                        binding.progress.setMax(100);
+                                                        binding.progress.setProgress(progress);
+
+                                                        binding.setFileLength(total);
+                                                        binding.setDownloadedLength(current);
+                                                    }
+                                                });
+                                                 */
+                                            }
+                                        });
+                            } catch (Exception e) {
+                                RemoteLogger.log(context, Const.LOG_WARN, "Failed to download app " + application.getPkg() + ": " + e.getMessage());
+                                e.printStackTrace();
+                                // Save the download attempt in the database
+                                saveFailedAttempt(context, lastDownload, application.getUrl(), tempPath, false, false);
+                            }
                         }
 
                         if (file != null) {
@@ -1147,8 +1187,11 @@ public class ConfigUpdater {
                                     File file = pendingInstallations.get(packageName);
                                     if (file != null) {
                                         pendingInstallations.remove(packageName);
-                                        InstallUtils.deleteTempApk(file);
-                                        // Save failed install attempt to prevent next downloads
+                                        // Keep the APK for a cached retry when install-retry is enabled; otherwise delete it.
+                                        if (!retryFailedInstallEnabled()) {
+                                            InstallUtils.deleteTempApk(file);
+                                        }
+                                        // Save failed install attempt (downloaded=true, installed=false)
                                         saveFailedAttempt(context, null, "", file.getAbsolutePath(), true, false);
                                     }
                                 }
@@ -1219,7 +1262,8 @@ public class ConfigUpdater {
                 public void onInstallError(String msg) {
                     Log.i(Const.LOG_TAG, "installApplication(): error installing app " + packageName);
                     pendingInstallations.remove(packageName);
-                    if (file.exists()) {
+                    // Keep the APK for a cached retry when install-retry is enabled; otherwise delete it.
+                    if (!retryFailedInstallEnabled() && file.exists()) {
                         file.delete();
                     }
                     if (uiNotifier != null) {
@@ -1255,7 +1299,8 @@ public class ConfigUpdater {
                 @Override
                 public void onInstallError(String msg) {
                     pendingInstallations.remove(packageName);
-                    if (file.exists()) {
+                    // Keep the APK for a cached retry when install-retry is enabled; otherwise delete it.
+                    if (!retryFailedInstallEnabled() && file.exists()) {
                         file.delete();
                     }
                     if (msg != null) {

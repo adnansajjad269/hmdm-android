@@ -117,6 +117,7 @@ import com.hmdm.launcher.util.DeviceInfoProvider;
 import com.hmdm.launcher.util.InstallUtils;
 import com.hmdm.launcher.util.PreferenceLogger;
 import com.hmdm.launcher.util.RemoteLogger;
+import com.hmdm.launcher.util.WifiBssidTracker;
 import com.hmdm.launcher.util.SystemUtils;
 import com.hmdm.launcher.util.Utils;
 import com.hmdm.launcher.worker.SendDeviceInfoWorker;
@@ -322,6 +323,9 @@ public class MainActivity
                         RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Network connection lost");
                     }
                 }
+                // This receiver on the persistent home activity survives Doze, unlike the
+                // StatusControlService one, so it reliably catches cross-network Wi-Fi switches.
+                WifiBssidTracker.checkAndLog(context, true);
             }
 
             try {
@@ -555,6 +559,10 @@ public class MainActivity
         super.onResume();
 
         isBackground = false;
+
+        // Reconcile the Wi-Fi BSSID on resume: catches a switch that happened while the launcher
+        // was backgrounded/asleep (logged "(detected on wake)" when it differs from the last seen).
+        WifiBssidTracker.checkAndLog(getApplicationContext(), false);
 
         // CUSTOM (fleet patch): retry lock-task whitelist on every resume.
         // At first-boot onCreate, device-owner status may not yet be registered,

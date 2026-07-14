@@ -9,11 +9,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.location.LocationManager;
 import android.net.ConnectivityManager;
-import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.IBinder;
-import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
@@ -21,8 +19,8 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import com.hmdm.launcher.Const;
 import com.hmdm.launcher.helper.SettingsHelper;
 import com.hmdm.launcher.json.ServerConfig;
-import com.hmdm.launcher.util.RemoteLogger;
 import com.hmdm.launcher.util.Utils;
+import com.hmdm.launcher.util.WifiBssidTracker;
 
 import java.util.Timer;
 import java.util.TimerTask;
@@ -46,13 +44,6 @@ public class StatusControlService extends Service {
     private final long MIN_STATUS_CHECK_INTERVAL_MS = 10000;
     private final long MAX_STATUS_CHECK_INTERVAL_MS = 600000;
 
-    // The redacted BSSID Android returns when location permission/services are unavailable.
-    private static final String REDACTED_BSSID = "02:00:00:00:00:00";
-    // Marker prefix so a single narrow server log rule can capture only these roam events.
-    private static final String BSSID_LOG_MARKER = "WIFI_BSSID_CHANGED";
-
-    // Last observed WiFi BSSID (AP MAC), for detecting roams including same-SSID AP changes.
-    private String lastBssid = null;
     private BroadcastReceiver wifiStateReceiver;
 
     private static class PackageInfo {
@@ -103,7 +94,8 @@ public class StatusControlService extends Service {
         wifiStateReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                handleWifiStateChange();
+                // Observed live while the service is alive (catches same-SSID roams immediately)
+                WifiBssidTracker.checkAndLog(getApplicationContext(), true);
             }
         };
         try {
@@ -113,8 +105,6 @@ public class StatusControlService extends Service {
             } else {
                 registerReceiver(wifiStateReceiver, filter);
             }
-            // Prime the baseline silently so only subsequent real roams are logged.
-            lastBssid = readCurrentBssid();
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -128,61 +118,6 @@ public class StatusControlService extends Service {
                 // Already unregistered
             }
             wifiStateReceiver = null;
-        }
-    }
-
-    // Returns the current connected BSSID (AP MAC), or null if not connected or the value is
-    // redacted (no location permission/services — Android returns 02:00:00:00:00:00 then).
-    @SuppressLint("MissingPermission")
-    private String readCurrentBssid() {
-        try {
-            WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            if (wifiManager == null) {
-                return null;
-            }
-            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
-            String bssid = wifiInfo != null ? wifiInfo.getBSSID() : null;
-            if (bssid == null || bssid.isEmpty() || REDACTED_BSSID.equals(bssid)) {
-                return null;
-            }
-            return bssid;
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
-        }
-    }
-
-    // If the BSSID changed to a valid AP MAC (including a same-SSID roam), logs one timestamped
-    // INFO event. Relayed through the existing gated/batched RemoteLogger channel; a single narrow
-    // server log rule filtered to the marker uploads only these events.
-    @SuppressLint("MissingPermission")
-    private void handleWifiStateChange() {
-        try {
-            String bssid = readCurrentBssid();
-            if (bssid == null) {
-                // Not connected or BSSID redacted; keep the last known BSSID so a transient
-                // disconnect isn't logged as a roam.
-                return;
-            }
-            if (bssid.equals(lastBssid)) {
-                // No change
-                return;
-            }
-
-            lastBssid = bssid;
-            String ssid = null;
-            try {
-                WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-                WifiInfo wifiInfo = wifiManager != null ? wifiManager.getConnectionInfo() : null;
-                ssid = wifiInfo != null ? wifiInfo.getSSID() : null;
-            } catch (Exception e) {
-                // SSID is best-effort context only
-            }
-            RemoteLogger.log(this, Const.LOG_INFO, BSSID_LOG_MARKER + " " + bssid
-                    + (TextUtils.isEmpty(ssid) ? "" : " ssid=" + ssid));
-        } catch (Exception e) {
-            // A WiFi/permission error must never crash the service
-            e.printStackTrace();
         }
     }
 
