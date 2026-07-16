@@ -32,16 +32,18 @@ import com.hmdm.launcher.Const;
  * Exploratory launcher-side suppression of the Play Protect / package-verifier install prompt.
  *
  * This is gated behind a server-managed application setting ("playProtectMode" on the launcher's
- * own package) so it can be turned on/off from the web panel without a rebuild, and it is off by
- * default. Everything is wrapped in try/catch: a Play Protect failure must never crash or block
- * the config update loop.
+ * own package) so it can be tuned from the web panel without a rebuild. Everything is wrapped in
+ * try/catch: a Play Protect failure must never crash or block the config update loop, and the real
+ * work runs at most once per resolved mode per process (no per-config-poll repetition).
  *
  * Modes:
- *   off | (absent)  - do nothing; un-hide com.android.vending if we previously hid it
- *   settings        - attempt dpm.setGlobalSetting() for the verifier flags (expected to throw
- *                     SecurityException on most images; we record the empirical result)
- *   hide-verifier   - hide com.android.vending (the package that raises the prompt) so
- *                     PackageManager has no verifier to wait on
+ *   (absent)        - MODE_DEFAULT: best-effort, try both supported approaches once (settings, hide)
+ *   off             - do nothing; un-hide com.android.vending if we previously hid it
+ *   settings        - attempt dpm.setGlobalSetting() for the verifier flags (may throw
+ *                     SecurityException depending on API level / OEM image; we record the result)
+ *   hide-verifier   - hide com.android.vending as device owner. NOTE: some images (e.g. Kyocera)
+ *                     refuse this and setApplicationHidden returns false — then it cannot work and
+ *                     the settings approach or the ADB provisioning workaround must be used instead.
  *
  * Hard constraints (see task §6.5): no reflection, no hidden APIs, no WRITE_SECURE_SETTINGS,
  * and com.google.android.gms is never touched.
@@ -53,6 +55,8 @@ public class PlayProtectUtils {
     public static final String MODE_OFF = "off";
     public static final String MODE_SETTINGS = "settings";
     public static final String MODE_HIDE_VERIFIER = "hide-verifier";
+    // Internal value the unset preference maps to: try both supported approaches once.
+    public static final String MODE_DEFAULT = "default";
 
     // The package believed to host the install-time verifier that raises the prompt.
     // This must be confirmed on-device from logcat (task §6.4) before relying on it.
@@ -62,16 +66,32 @@ public class PlayProtectUtils {
     private static final String LOCAL_PREF_NAME = "play_protect_state";
     private static final String LOCAL_PREF_HIDDEN = "verifier_hidden";
 
+    // Loop guard: the resolved mode last applied in THIS process. applyMode() is called on every
+    // config poll, but the actual work (and its log lines) only needs to run when the mode changes
+    // or the process restarts (a reboot re-applies once). This stops the per-poll log spam seen
+    // when e.g. hide-verifier keeps returning false on an image that won't let us hide the package.
+    private static volatile String lastAppliedMode = null;
+
     /**
-     * Applies the configured Play Protect suppression mode. Safe to call on every config update.
+     * Applies the configured Play Protect suppression mode. Safe to call on every config update:
+     * repeated calls with an unchanged mode are no-ops within the same process.
+     *
+     * Unset default: attempt BOTH supported approaches once (verifier settings, then hiding the
+     * verifier package). On some OEM images (e.g. Kyocera) hiding com.android.vending is refused
+     * by the device owner and setApplicationHidden returns false; the settings attempt is the more
+     * likely lever, so we try it too rather than relying on the hide alone.
      */
     public static void applyMode(Context context, String mode) {
         if (mode == null || mode.trim().equals("")) {
-            // Fleet-wide default: suppress Play Protect out of the box by hiding the verifier.
-            // Set the app preference playProtectMode=off in the web console to restore Play Store.
-            mode = MODE_HIDE_VERIFIER;
+            mode = MODE_DEFAULT;
         }
         mode = mode.trim();
+
+        // Only do real work (and log) when the resolved mode changes within this process.
+        if (mode.equals(lastAppliedMode)) {
+            return;
+        }
+        lastAppliedMode = mode;
 
         try {
             if (!Utils.isDeviceOwner(context)) {
@@ -81,15 +101,19 @@ public class PlayProtectUtils {
 
             logVerifierState(context, mode);
 
-            if (MODE_SETTINGS.equals(mode)) {
+            if (MODE_OFF.equals(mode)) {
+                // Reverse any hide we previously applied
+                if (wasVerifierHidden(context)) {
+                    setVerifierHidden(context, false);
+                }
+            } else if (MODE_SETTINGS.equals(mode)) {
                 applySettingsMode(context);
             } else if (MODE_HIDE_VERIFIER.equals(mode)) {
                 setVerifierHidden(context, true);
             } else {
-                // MODE_OFF or unknown value: reverse any hide we previously applied
-                if (wasVerifierHidden(context)) {
-                    setVerifierHidden(context, false);
-                }
+                // MODE_DEFAULT or any unknown value: best-effort, try both supported approaches once
+                applySettingsMode(context);
+                setVerifierHidden(context, true);
             }
         } catch (Exception e) {
             // Never propagate — this must not block the config update loop
@@ -126,10 +150,22 @@ public class PlayProtectUtils {
             return;
         }
         try {
+            // Already in the desired state? Nothing to do (and nothing to log).
+            if (dpm.isApplicationHidden(admin, VERIFIER_PACKAGE) == hidden) {
+                rememberVerifierHidden(context, hidden);
+                return;
+            }
             boolean result = dpm.setApplicationHidden(admin, VERIFIER_PACKAGE, hidden);
             rememberVerifierHidden(context, hidden && result);
-            RemoteLogger.log(context, Const.LOG_INFO, "Play Protect: setApplicationHidden(" + VERIFIER_PACKAGE
-                    + ", " + hidden + ") returned " + result);
+            if (hidden && !result) {
+                // This image (e.g. Kyocera) refuses to let the device owner hide Play Store.
+                // hide-verifier cannot work here; use playProtectMode=settings or the ADB workaround.
+                RemoteLogger.log(context, Const.LOG_WARN, "Play Protect: cannot hide " + VERIFIER_PACKAGE
+                        + " on this device (setApplicationHidden returned false) — hide-verifier unsupported here");
+            } else {
+                RemoteLogger.log(context, Const.LOG_INFO, "Play Protect: setApplicationHidden(" + VERIFIER_PACKAGE
+                        + ", " + hidden + ") returned " + result);
+            }
         } catch (Exception e) {
             RemoteLogger.log(context, Const.LOG_WARN, "Play Protect: setApplicationHidden failed: " + e.getMessage());
         }
