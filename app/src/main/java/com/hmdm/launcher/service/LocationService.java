@@ -62,7 +62,11 @@ public class LocationService extends Service {
     boolean updateViaGps = false;
     boolean started = false;
 
-    private static final int LOCATION_UPDATE_INTERVAL = 60000;
+    // Location fix interval (provider minTime). Tunable per-config via the "locationUpdateIntervalSec"
+    // app preference, clamped to [MIN, MAX]. Default raised to 900 s (15 min) to cut location wakeups.
+    private static final long DEFAULT_LOCATION_UPDATE_INTERVAL_MS = 900000;
+    private static final long MIN_LOCATION_UPDATE_INTERVAL_MS = 60000;    // 1 min floor
+    private static final long MAX_LOCATION_UPDATE_INTERVAL_MS = 3600000;  // 1 hour ceiling
 
     // Use different location listeners for GPS and Network
     // Not sure what happens if we share the same listener for both providers
@@ -162,6 +166,27 @@ public class LocationService extends Service {
         }
     }
 
+    // Resolve the location fix interval: default DEFAULT_LOCATION_UPDATE_INTERVAL_MS, overridable
+    // per-config via the "locationUpdateIntervalSec" app preference, clamped to [MIN, MAX].
+    private long resolveLocationUpdateInterval() {
+        long intervalMs = DEFAULT_LOCATION_UPDATE_INTERVAL_MS;
+        try {
+            String pref = SettingsHelper.getInstance(this).getAppPreference(getPackageName(), "locationUpdateIntervalSec");
+            if (pref != null && !pref.trim().isEmpty()) {
+                long candidate = Long.parseLong(pref.trim()) * 1000L;
+                if (candidate < MIN_LOCATION_UPDATE_INTERVAL_MS) {
+                    candidate = MIN_LOCATION_UPDATE_INTERVAL_MS;
+                } else if (candidate > MAX_LOCATION_UPDATE_INTERVAL_MS) {
+                    candidate = MAX_LOCATION_UPDATE_INTERVAL_MS;
+                }
+                intervalMs = candidate;
+            }
+        } catch (Exception e) {
+            // Bad preference value: keep the default
+        }
+        return intervalMs;
+    }
+
     private boolean requestLocationUpdates() {
         if (updateViaGps && (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) !=
                 PackageManager.PERMISSION_GRANTED || !locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER))) {
@@ -179,12 +204,15 @@ public class LocationService extends Service {
         RemoteLogger.log(this, Const.LOG_VERBOSE,
                 "Request location updates. gps=" + gpsEnabled + ", network=" + networkEnabled + ", passive=" + passiveEnabled);
 
+        long updateInterval = resolveLocationUpdateInterval();
+        RemoteLogger.log(this, Const.LOG_INFO, "Location update interval = " + updateInterval + " ms");
+
         locationManager.removeUpdates(networkLocationListener);
         locationManager.removeUpdates(gpsLocationListener);
         try {
-            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, LOCATION_UPDATE_INTERVAL, 0, networkLocationListener);
+            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, updateInterval, 0, networkLocationListener);
             if (updateViaGps) {
-                locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, LOCATION_UPDATE_INTERVAL, 0, gpsLocationListener);
+                locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, updateInterval, 0, gpsLocationListener);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     locationManager.registerGnssStatusCallback(gnssStatusCallback, handler);
                 }

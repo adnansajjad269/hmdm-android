@@ -24,7 +24,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.provider.Settings;
-import android.util.Log;
 
 import com.hmdm.launcher.Const;
 
@@ -133,7 +132,12 @@ public class PlayProtectUtils {
         try {
             dpm.setGlobalSetting(admin, "package_verifier_enable", "0");
             dpm.setGlobalSetting(admin, "package_verifier_user_consent", "-1");
-            RemoteLogger.log(context, Const.LOG_INFO, "Play Protect: verifier settings applied via setGlobalSetting");
+            // Re-read to prove whether the write actually stuck (values now 0/-1) or was silently
+            // ignored (still 1) — the empirical answer we otherwise can't see.
+            String enableAfter = Settings.Global.getString(context.getContentResolver(), "package_verifier_enable");
+            String consentAfter = Settings.Global.getString(context.getContentResolver(), "package_verifier_user_consent");
+            RemoteLogger.log(context, Const.LOG_INFO, "Play Protect: verifier settings applied via setGlobalSetting; "
+                    + "package_verifier_enable now=" + enableAfter + " package_verifier_user_consent now=" + consentAfter);
         } catch (SecurityException e) {
             RemoteLogger.log(context, Const.LOG_WARN, "Play Protect: setGlobalSetting not permitted for device owner: " + e.getMessage());
         } catch (Exception e) {
@@ -171,13 +175,15 @@ public class PlayProtectUtils {
         }
     }
 
-    // Diagnostic (task §6.2): log the current verifier settings so the on-device test can
-    // identify which prompt is actually blocking. These globals are world-readable.
+    // Diagnostic (task §6.2): log the resolved mode and the current verifier settings to the
+    // SERVER (RemoteLogger, not just logcat) so we can confirm the preference reached the launcher
+    // and see the before/after verifier state. These globals are world-readable. Runs once per
+    // mode change (loop guard), so not spammy.
     private static void logVerifierState(Context context, String mode) {
         try {
             String consent = Settings.Global.getString(context.getContentResolver(), "package_verifier_user_consent");
             String enable = Settings.Global.getString(context.getContentResolver(), "package_verifier_enable");
-            Log.d(Const.LOG_TAG, "Play Protect mode=" + mode
+            RemoteLogger.log(context, Const.LOG_INFO, "Play Protect mode=" + mode
                     + " package_verifier_user_consent=" + consent
                     + " package_verifier_enable=" + enable);
         } catch (Exception e) {

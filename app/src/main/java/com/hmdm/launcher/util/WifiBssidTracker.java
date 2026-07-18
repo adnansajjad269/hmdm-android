@@ -22,67 +22,81 @@ package com.hmdm.launcher.util;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.location.LocationManager;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.text.TextUtils;
 
 import com.hmdm.launcher.Const;
 
 /**
- * Detects and logs changes of the connected Wi-Fi BSSID (access-point MAC), including roaming
- * between APs on the same SSID.
+ * Detects and logs the connected Wi-Fi BSSID (access-point MAC), including roaming between APs on
+ * the same SSID. Uses a unified "WIFI_BSSID" marker prefix so a single server log rule filtered to
+ * "WIFI_BSSID" captures every message this class emits.
  *
- * The last BSSID is persisted in SharedPreferences (not kept only in memory), so a process
- * restart compares the current AP against the last logged one and reports a real change instead
- * of silently re-adopting it as a fresh baseline. The single synchronized entry point plus the
- * shared persisted value deduplicates across all call sites (the Wi-Fi state receiver, the
- * connectivity receiver on the persistent home activity, and the Doze-exempt config-update wake),
- * so a given switch is logged exactly once regardless of which path observes it first.
+ * The last BSSID is persisted in SharedPreferences so a process restart compares against the last
+ * logged AP instead of silently re-priming. The single synchronized entry point plus the shared
+ * persisted value deduplicates across all call sites (the Wi-Fi state receiver, the connectivity
+ * receiver on the persistent home activity, and the Doze-exempt config-update wake).
+ *
+ * Three states are handled:
+ *  - valid BSSID different from the last logged one -> WIFI_BSSID_CHANGED (this also covers the
+ *    first observation after connect/install, so "first connected" is visible);
+ *  - connected but BSSID redacted (02:00:00:00:00:00 — returned when location services are off or
+ *    the location permission is missing) -> WIFI_BSSID_UNAVAILABLE, logged once per transition so
+ *    the reason for the silence is visible without spamming;
+ *  - not connected -> nothing (keep the last known BSSID).
  */
 public class WifiBssidTracker {
 
     private static final String PREF_NAME = "wifi_bssid_state";
     private static final String KEY_LAST_BSSID = "last_bssid";
+    private static final String KEY_UNAVAILABLE_REPORTED = "unavailable_reported";
 
     // The redacted BSSID Android returns when location permission/services are unavailable.
     private static final String REDACTED_BSSID = "02:00:00:00:00:00";
-    // Marker prefix so a single narrow server log rule can capture only these roam events.
-    private static final String LOG_MARKER = "WIFI_BSSID_CHANGED";
 
     /**
-     * Reads the current BSSID and, if it changed to a valid AP MAC since the last logged value,
-     * logs one timestamped INFO event and persists the new value.
+     * Reads the current BSSID and logs a change (or the first observation), or a one-time
+     * "unavailable" diagnostic when the BSSID is redacted.
      *
      * @param live true when observed in real time (receiver); false when reconciled on a wake
-     *             (the log is then marked "(detected on wake)" since the switch may have happened
-     *             earlier, while the process was asleep).
+     *             (a change is then marked "(detected on wake)").
      */
     public static synchronized void checkAndLog(Context ctx, boolean live) {
         try {
-            String bssid = readCurrentBssid(ctx);
-            if (bssid == null) {
-                // Not connected, or BSSID redacted (no location permission/services). Keep the
-                // last known BSSID so a transient disconnect isn't logged as a roam.
-                return;
-            }
-
             SharedPreferences prefs = ctx.getApplicationContext()
                     .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+            String rawBssid = readRawBssid(ctx);
+
+            if (rawBssid == null || rawBssid.isEmpty()) {
+                // Not connected to Wi-Fi: keep the last known BSSID, nothing to log.
+                return;
+            }
+
+            if (REDACTED_BSSID.equals(rawBssid)) {
+                // Connected but the BSSID is hidden. Log once per transition into this state.
+                if (!prefs.getBoolean(KEY_UNAVAILABLE_REPORTED, false)) {
+                    prefs.edit().putBoolean(KEY_UNAVAILABLE_REPORTED, true).apply();
+                    RemoteLogger.log(ctx, Const.LOG_INFO, "WIFI_BSSID_UNAVAILABLE redacted "
+                            + "(location services off or permission missing); locationEnabled=" + isLocationEnabled(ctx));
+                }
+                return;
+            }
+
+            // Valid BSSID: clear the unavailable dedup flag so a later redaction re-logs once.
+            prefs.edit().putBoolean(KEY_UNAVAILABLE_REPORTED, false).apply();
+
             String last = prefs.getString(KEY_LAST_BSSID, null);
-
-            if (last == null) {
-                // First observation ever: establish the baseline silently (no spurious "changed").
-                prefs.edit().putString(KEY_LAST_BSSID, bssid).apply();
+            if (rawBssid.equals(last)) {
+                // Same AP (e.g. a Doze reconnect to the same AP): no change, no log.
                 return;
             }
 
-            if (bssid.equals(last)) {
-                return;
-            }
-
-            prefs.edit().putString(KEY_LAST_BSSID, bssid).apply();
+            prefs.edit().putString(KEY_LAST_BSSID, rawBssid).apply();
             String ssid = readCurrentSsid(ctx);
-            RemoteLogger.log(ctx, Const.LOG_INFO, LOG_MARKER + " " + bssid
+            RemoteLogger.log(ctx, Const.LOG_INFO, "WIFI_BSSID_CHANGED " + rawBssid
                     + (TextUtils.isEmpty(ssid) ? "" : " ssid=" + ssid)
                     + (live ? "" : " (detected on wake)"));
         } catch (Exception e) {
@@ -91,8 +105,9 @@ public class WifiBssidTracker {
         }
     }
 
+    // Raw getBSSID() value (may be null when not connected, or the redacted value when hidden).
     @SuppressLint("MissingPermission")
-    private static String readCurrentBssid(Context ctx) {
+    private static String readRawBssid(Context ctx) {
         try {
             WifiManager wifiManager = (WifiManager) ctx.getApplicationContext()
                     .getSystemService(Context.WIFI_SERVICE);
@@ -100,13 +115,8 @@ public class WifiBssidTracker {
                 return null;
             }
             WifiInfo info = wifiManager.getConnectionInfo();
-            String bssid = info != null ? info.getBSSID() : null;
-            if (bssid == null || bssid.isEmpty() || REDACTED_BSSID.equals(bssid)) {
-                return null;
-            }
-            return bssid;
+            return info != null ? info.getBSSID() : null;
         } catch (Exception e) {
-            e.printStackTrace();
             return null;
         }
     }
@@ -120,6 +130,24 @@ public class WifiBssidTracker {
             return info != null ? info.getSSID() : null;
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    // Whether location services are enabled (required for a non-redacted BSSID on Android 8+).
+    private static boolean isLocationEnabled(Context ctx) {
+        try {
+            LocationManager lm = (LocationManager) ctx.getApplicationContext()
+                    .getSystemService(Context.LOCATION_SERVICE);
+            if (lm == null) {
+                return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                return lm.isLocationEnabled();
+            }
+            return lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                    || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        } catch (Exception e) {
+            return false;
         }
     }
 }
