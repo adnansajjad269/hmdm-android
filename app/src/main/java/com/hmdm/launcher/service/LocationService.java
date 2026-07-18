@@ -47,6 +47,7 @@ import com.hmdm.launcher.Const;
 import com.hmdm.launcher.R;
 import com.hmdm.launcher.helper.SettingsHelper;
 import com.hmdm.launcher.pro.ProUtils;
+import com.hmdm.launcher.util.DeviceInfoProvider;
 import com.hmdm.launcher.util.RemoteLogger;
 
 public class LocationService extends Service {
@@ -73,10 +74,10 @@ public class LocationService extends Service {
     private LocationListener gpsLocationListener = new LocationListener() {
         @Override
         public void onLocationChanged(Location location) {
-            // Do nothing here: we use getLastKnownLocation() to determine the location!
-            //Toast.makeText(LocationService.this, "Location updated from GPS", Toast.LENGTH_SHORT).show();
             RemoteLogger.log(LocationService.this, Const.LOG_VERBOSE, "GPS location update: lat="
                     + location.getLatitude() + ", lon=" + location.getLongitude());
+            // Capture the fix so it is retained even if getLastKnownLocation() later returns null.
+            DeviceInfoProvider.storeLastLocation(LocationService.this, location);
             ProUtils.processLocation(LocationService.this, location, LocationManager.GPS_PROVIDER);
         }
 
@@ -86,6 +87,8 @@ public class LocationService extends Service {
 
         @Override
         public void onProviderEnabled(String provider) {
+            // A provider coming online (e.g. enabling High Accuracy) must re-register so fixes flow.
+            requestLocationUpdates();
         }
 
         @Override
@@ -95,11 +98,30 @@ public class LocationService extends Service {
     private LocationListener networkLocationListener = new LocationListener() {
         @Override
         public void onLocationChanged(Location location) {
-            // Do nothing here: we use getLastKnownLocation() to determine the location!
-            //Toast.makeText(LocationService.this, "Location updated from Network", Toast.LENGTH_SHORT).show();
             RemoteLogger.log(LocationService.this, Const.LOG_VERBOSE, "Network location update: lat="
                     + location.getLatitude() + ", lon=" + location.getLongitude());
+            DeviceInfoProvider.storeLastLocation(LocationService.this, location);
             ProUtils.processLocation(LocationService.this, location, LocationManager.NETWORK_PROVIDER);
+        }
+
+        @Override
+        public void onStatusChanged(String provider, int status, Bundle extras) {
+        }
+
+        @Override
+        public void onProviderEnabled(String provider) {
+            requestLocationUpdates();
+        }
+
+        @Override
+        public void onProviderDisabled(String provider) {
+        }
+    };
+    // Passive provider: receives fixes produced for other apps — an extra source indoors.
+    private LocationListener passiveLocationListener = new LocationListener() {
+        @Override
+        public void onLocationChanged(Location location) {
+            DeviceInfoProvider.storeLastLocation(LocationService.this, location);
         }
 
         @Override
@@ -209,8 +231,16 @@ public class LocationService extends Service {
 
         locationManager.removeUpdates(networkLocationListener);
         locationManager.removeUpdates(gpsLocationListener);
+        locationManager.removeUpdates(passiveLocationListener);
         try {
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, updateInterval, 0, networkLocationListener);
+            // Passive provider costs nothing extra (it only delivers fixes other apps requested)
+            // and can supply a location indoors when GPS cannot.
+            try {
+                locationManager.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER, updateInterval, 0, passiveLocationListener);
+            } catch (Exception e) {
+                // Passive provider may be unavailable — ignore
+            }
             if (updateViaGps) {
                 locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, updateInterval, 0, gpsLocationListener);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -231,6 +261,7 @@ public class LocationService extends Service {
     public void onDestroy() {
         locationManager.removeUpdates(networkLocationListener);
         locationManager.removeUpdates(gpsLocationListener);
+        locationManager.removeUpdates(passiveLocationListener);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             locationManager.unregisterGnssStatusCallback(gnssStatusCallback);
         }
@@ -247,7 +278,6 @@ public class LocationService extends Service {
 
     @Override
     public int onStartCommand(Intent inputIntent, int flags, int startId) {
-        boolean legacyGpsFlag = updateViaGps;
         if (inputIntent != null && inputIntent.getAction() != null) {
             if (inputIntent.getAction().equals(ACTION_STOP)) {
                 // Stop service
@@ -263,14 +293,14 @@ public class LocationService extends Service {
         } else {
             updateViaGps = false;
         }
-        if (!started || legacyGpsFlag != updateViaGps) {
-            if (!requestLocationUpdates()) {
-                // No permissions!
-                started = false;
-                stopForeground(true);
-                stopSelf();
-                return Service.START_NOT_STICKY;
-            }
+        // Always (re)register: this picks up provider changes (e.g. enabling High Accuracy) and
+        // config-driven restarts, which the previous "only when !started" gate missed.
+        if (!requestLocationUpdates()) {
+            // No permissions!
+            started = false;
+            stopForeground(true);
+            stopSelf();
+            return Service.START_NOT_STICKY;
         }
         if (!started) {
             startAsForeground();

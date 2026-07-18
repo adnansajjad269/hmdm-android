@@ -418,6 +418,21 @@ public class InstallUtils {
             PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
                     PackageInstaller.SessionParams.MODE_FULL_INSTALL);
             params.setAppPackageName(packageName);
+            // Mark this as a managed/policy install so a device-owner install is treated as
+            // enterprise and does not stall on a user-action / Play Protect confirmation prompt.
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    params.setInstallReason(PackageManager.INSTALL_REASON_POLICY);
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // API 31+: explicitly declare that no user action is required (no-op on older
+                    // devices, where a device-owner install is already silent).
+                    params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
+                }
+            } catch (Exception e) {
+                // Never let a params tweak break the install
+                Log.w(Const.LOG_TAG, "Could not set managed-install session params: " + e.getMessage());
+            }
             // set params
             int sessionId = packageInstaller.createSession(params);
             PackageInstaller.Session session = packageInstaller.openSession(sessionId);

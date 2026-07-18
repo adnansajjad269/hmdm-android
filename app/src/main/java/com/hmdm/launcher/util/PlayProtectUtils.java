@@ -25,6 +25,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.provider.Settings;
 
+import com.hmdm.launcher.BuildConfig;
 import com.hmdm.launcher.Const;
 
 /**
@@ -61,19 +62,18 @@ public class PlayProtectUtils {
     // This must be confirmed on-device from logcat (task §6.4) before relying on it.
     private static final String VERIFIER_PACKAGE = "com.android.vending";
 
-    // Local flag remembering whether we hid the verifier, so "off" can reverse it.
+    // Local prefs: whether we hid the verifier (so "off" can reverse it), plus the persisted loop
+    // guard (last applied mode + app version).
     private static final String LOCAL_PREF_NAME = "play_protect_state";
     private static final String LOCAL_PREF_HIDDEN = "verifier_hidden";
-
-    // Loop guard: the resolved mode last applied in THIS process. applyMode() is called on every
-    // config poll, but the actual work (and its log lines) only needs to run when the mode changes
-    // or the process restarts (a reboot re-applies once). This stops the per-poll log spam seen
-    // when e.g. hide-verifier keeps returning false on an image that won't let us hide the package.
-    private static volatile String lastAppliedMode = null;
+    private static final String LOCAL_PREF_LAST_MODE = "last_applied_mode";
+    private static final String LOCAL_PREF_LAST_VERSION = "last_applied_version";
 
     /**
      * Applies the configured Play Protect suppression mode. Safe to call on every config update:
-     * repeated calls with an unchanged mode are no-ops within the same process.
+     * the actual work (and its log lines) runs only when the resolved mode or the app version
+     * changes. The guard is PERSISTED (not just in-memory) so it survives the Doze process restarts
+     * that otherwise reset it and caused the diagnostics to re-log every ~15 min.
      *
      * Unset default: attempt BOTH supported approaches once (verifier settings, then hiding the
      * verifier package). On some OEM images (e.g. Kyocera) hiding com.android.vending is refused
@@ -86,11 +86,18 @@ public class PlayProtectUtils {
         }
         mode = mode.trim();
 
-        // Only do real work (and log) when the resolved mode changes within this process.
-        if (mode.equals(lastAppliedMode)) {
+        // Only do real work (and log) when the resolved mode or the app version changes.
+        SharedPreferences guardPrefs = context.getApplicationContext()
+                .getSharedPreferences(LOCAL_PREF_NAME, Context.MODE_PRIVATE);
+        String lastMode = guardPrefs.getString(LOCAL_PREF_LAST_MODE, null);
+        int lastVersion = guardPrefs.getInt(LOCAL_PREF_LAST_VERSION, -1);
+        if (mode.equals(lastMode) && lastVersion == BuildConfig.VERSION_CODE) {
             return;
         }
-        lastAppliedMode = mode;
+        guardPrefs.edit()
+                .putString(LOCAL_PREF_LAST_MODE, mode)
+                .putInt(LOCAL_PREF_LAST_VERSION, BuildConfig.VERSION_CODE)
+                .apply();
 
         try {
             if (!Utils.isDeviceOwner(context)) {

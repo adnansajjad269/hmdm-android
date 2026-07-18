@@ -26,6 +26,7 @@ import android.location.LocationManager;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.SystemClock;
 import android.text.TextUtils;
 
 import com.hmdm.launcher.Const;
@@ -53,6 +54,12 @@ public class WifiBssidTracker {
     private static final String PREF_NAME = "wifi_bssid_state";
     private static final String KEY_LAST_BSSID = "last_bssid";
     private static final String KEY_UNAVAILABLE_REPORTED = "unavailable_reported";
+    private static final String KEY_BOOT_TIME = "boot_time";
+    private static final String KEY_BOOT_LOGGED = "boot_logged";
+
+    // Approximate boot instant (currentTimeMillis - elapsedRealtime) shifts on reboot; small
+    // tolerance absorbs clock drift/NTP adjustments so we don't false-detect a reboot.
+    private static final long BOOT_TOLERANCE_MS = 15000;
 
     // The redacted BSSID Android returns when location permission/services are unavailable.
     private static final String REDACTED_BSSID = "02:00:00:00:00:00";
@@ -68,6 +75,19 @@ public class WifiBssidTracker {
         try {
             SharedPreferences prefs = ctx.getApplicationContext()
                     .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+
+            // Detect a reboot: on a new boot, force the connected BSSID to be logged again (even
+            // if it is the same AP), per the "log connected AP on every reboot" requirement.
+            long bootTime = System.currentTimeMillis() - SystemClock.elapsedRealtime();
+            long lastBootTime = prefs.getLong(KEY_BOOT_TIME, 0);
+            if (Math.abs(bootTime - lastBootTime) > BOOT_TOLERANCE_MS) {
+                prefs.edit()
+                        .putLong(KEY_BOOT_TIME, bootTime)
+                        .putBoolean(KEY_BOOT_LOGGED, false)
+                        .putBoolean(KEY_UNAVAILABLE_REPORTED, false)
+                        .apply();
+            }
+
             String rawBssid = readRawBssid(ctx);
 
             if (rawBssid == null || rawBssid.isEmpty()) {
@@ -89,13 +109,26 @@ public class WifiBssidTracker {
             prefs.edit().putBoolean(KEY_UNAVAILABLE_REPORTED, false).apply();
 
             String last = prefs.getString(KEY_LAST_BSSID, null);
+            String ssid = readCurrentSsid(ctx);
+
+            if (!prefs.getBoolean(KEY_BOOT_LOGGED, false)) {
+                // First valid BSSID after a boot: log the connected AP regardless of change.
+                prefs.edit()
+                        .putString(KEY_LAST_BSSID, rawBssid)
+                        .putBoolean(KEY_BOOT_LOGGED, true)
+                        .apply();
+                RemoteLogger.log(ctx, Const.LOG_INFO, "WIFI_BSSID_CONNECTED " + rawBssid
+                        + (TextUtils.isEmpty(ssid) ? "" : " ssid=" + ssid)
+                        + (live ? "" : " (detected on wake)"));
+                return;
+            }
+
             if (rawBssid.equals(last)) {
                 // Same AP (e.g. a Doze reconnect to the same AP): no change, no log.
                 return;
             }
 
             prefs.edit().putString(KEY_LAST_BSSID, rawBssid).apply();
-            String ssid = readCurrentSsid(ctx);
             RemoteLogger.log(ctx, Const.LOG_INFO, "WIFI_BSSID_CHANGED " + rawBssid
                     + (TextUtils.isEmpty(ssid) ? "" : " ssid=" + ssid)
                     + (live ? "" : " (detected on wake)"));

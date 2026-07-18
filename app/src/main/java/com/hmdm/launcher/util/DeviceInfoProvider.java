@@ -23,6 +23,7 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.location.Location;
@@ -196,42 +197,102 @@ public class DeviceInfoProvider {
     }
 
     @SuppressWarnings({"MissingPermission"})
+    // Persisted last received fix (from LocationService listeners), so a transient fix is retained
+    // even if getLastKnownLocation() later returns null.
+    private static final String LOCATION_PREF_NAME = "location_state";
+    private static final String LOC_LAT = "loc_lat";
+    private static final String LOC_LON = "loc_lon";
+    private static final String LOC_TS = "loc_ts";
+    private static final String LOC_NO_FIX_REPORTED = "no_fix_reported";
+
+    public static void storeLastLocation(Context context, Location location) {
+        if (location == null || (location.getLatitude() == 0 && location.getLongitude() == 0)) {
+            return;
+        }
+        try {
+            context.getApplicationContext().getSharedPreferences(LOCATION_PREF_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putLong(LOC_LAT, Double.doubleToRawLongBits(location.getLatitude()))
+                    .putLong(LOC_LON, Double.doubleToRawLongBits(location.getLongitude()))
+                    .putLong(LOC_TS, location.getTime())
+                    .apply();
+        } catch (Exception e) {
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     public static DeviceInfo.Location getLocation(Context context) {
         try {
             LocationManager locationManager = (LocationManager)context.getSystemService(Context.LOCATION_SERVICE);
-            Location lastLocationGps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-            Location lastLocationNetwork = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
 
-            if (lastLocationGps != null || lastLocationNetwork != null) {
+            DeviceInfo.Location best = null;
+            best = pickNewer(best, fromAndroidLocation(safeLastKnown(locationManager, LocationManager.GPS_PROVIDER)));
+            best = pickNewer(best, fromAndroidLocation(safeLastKnown(locationManager, LocationManager.NETWORK_PROVIDER)));
+            best = pickNewer(best, fromAndroidLocation(safeLastKnown(locationManager, LocationManager.PASSIVE_PROVIDER)));
+            best = pickNewer(best, readStoredLocation(context));
 
-                DeviceInfo.Location location = new DeviceInfo.Location();
-
-                Location lastLocation;
-                if (lastLocationGps == null || (lastLocationGps.getLatitude() == 0 && lastLocationGps.getLongitude() == 0)) {
-                    lastLocation = lastLocationNetwork;
-                } else if (lastLocationNetwork == null || (lastLocationNetwork.getLatitude() == 0 && lastLocationNetwork.getLongitude() == 0)) {
-                    lastLocation = lastLocationGps;
-                } else {
-                    // Get the latest location as the best one
-                    if (lastLocationGps.getTime() >= lastLocationNetwork.getTime()) {
-                        lastLocation = lastLocationGps;
-                    } else {
-                        lastLocation = lastLocationNetwork;
-                    }
+            SharedPreferences prefs = context.getApplicationContext()
+                    .getSharedPreferences(LOCATION_PREF_NAME, Context.MODE_PRIVATE);
+            if (best == null) {
+                // Explain blank coordinates once (server-visible) instead of silently reporting nothing.
+                if (!prefs.getBoolean(LOC_NO_FIX_REPORTED, false)) {
+                    prefs.edit().putBoolean(LOC_NO_FIX_REPORTED, true).apply();
+                    RemoteLogger.log(context, Const.LOG_INFO,
+                            "Location: no fix from any provider (gps/network/passive) — is network location enabled?");
                 }
-
-                if (lastLocation.getLatitude() == 0 && lastLocation.getLongitude() == 0) {
-                    return null;
-                }
-
-                location.setLat(lastLocation.getLatitude());
-                location.setLon(lastLocation.getLongitude());
-                location.setTs(lastLocation.getTime());
-                return location;
+                return null;
             }
+            prefs.edit().putBoolean(LOC_NO_FIX_REPORTED, false).apply();
+            return best;
         } catch (Exception e) {
         }
         return null;
+    }
+
+    @SuppressLint("MissingPermission")
+    private static Location safeLastKnown(LocationManager lm, String provider) {
+        try {
+            return lm != null ? lm.getLastKnownLocation(provider) : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static DeviceInfo.Location fromAndroidLocation(Location loc) {
+        if (loc == null || (loc.getLatitude() == 0 && loc.getLongitude() == 0)) {
+            return null;
+        }
+        DeviceInfo.Location l = new DeviceInfo.Location();
+        l.setLat(loc.getLatitude());
+        l.setLon(loc.getLongitude());
+        l.setTs(loc.getTime());
+        return l;
+    }
+
+    private static DeviceInfo.Location readStoredLocation(Context context) {
+        try {
+            SharedPreferences prefs = context.getApplicationContext()
+                    .getSharedPreferences(LOCATION_PREF_NAME, Context.MODE_PRIVATE);
+            if (!prefs.contains(LOC_TS)) {
+                return null;
+            }
+            DeviceInfo.Location l = new DeviceInfo.Location();
+            l.setLat(Double.longBitsToDouble(prefs.getLong(LOC_LAT, 0)));
+            l.setLon(Double.longBitsToDouble(prefs.getLong(LOC_LON, 0)));
+            l.setTs(prefs.getLong(LOC_TS, 0));
+            if (l.getLat() == 0 && l.getLon() == 0) {
+                return null;
+            }
+            return l;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static DeviceInfo.Location pickNewer(DeviceInfo.Location a, DeviceInfo.Location b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return b.getTs() >= a.getTs() ? b : a;
     }
 
     @SuppressLint("MissingPermission")
