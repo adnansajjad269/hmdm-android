@@ -172,7 +172,7 @@ public class DeviceInfo {
         this.batteryLevel = batteryLevel;
     }
 
-    public String isBatteryCharging() {
+    public String getBatteryCharging() {
         return batteryCharging;
     }
 

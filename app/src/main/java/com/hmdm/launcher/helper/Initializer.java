@@ -22,6 +22,7 @@ import com.hmdm.launcher.pro.ProUtils;
 import com.hmdm.launcher.pro.service.CheckForegroundAppAccessibilityService;
 import com.hmdm.launcher.pro.service.CheckForegroundApplicationService;
 import com.hmdm.launcher.pro.worker.DetailedInfoWorker;
+import com.hmdm.launcher.service.LocationService;
 import com.hmdm.launcher.service.PushLongPollingService;
 import com.hmdm.launcher.service.StatusControlService;
 import com.hmdm.launcher.task.SendDeviceInfoTask;
@@ -153,6 +154,32 @@ public class Initializer {
         }
         try {
             context.startService(new Intent(context, StatusControlService.class));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        // Start location acquisition here too (not only from MainActivity): previously
+        // LocationService was only ever (re)started via MainActivity's onPoliciesUpdated()
+        // lifecycle callback, so if MainActivity wasn't alive/foreground (e.g. another app in
+        // kiosk foreground, or the process killed), location silently stopped and stayed stopped
+        // across reboots, since BootReceiver never started it either. Use the cached config here,
+        // same pattern as the push-service selection above, so this works immediately at boot
+        // without waiting for a fresh network fetch. Only start when there is an actual reason to
+        // (a real update action) — calling startForegroundService() when the service would just
+        // immediately stop (ACTION_STOP path never calls startForeground()) risks a
+        // "did not then call Service.startForeground()" crash on API 26+.
+        try {
+            String requestUpdatesAction = (settingsHelper != null && settingsHelper.getConfig() != null)
+                    ? settingsHelper.getConfig().getRequestUpdates() : null;
+            if (requestUpdatesAction != null && !LocationService.ACTION_STOP.equals(requestUpdatesAction)) {
+                Intent locationIntent = new Intent(context, LocationService.class);
+                locationIntent.setAction(requestUpdatesAction);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(locationIntent);
+                } else {
+                    context.startService(locationIntent);
+                }
+            }
         } catch (Exception e) {
             e.printStackTrace();
         }

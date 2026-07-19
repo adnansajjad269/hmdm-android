@@ -37,12 +37,21 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.GoogleApiAvailability;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
 import com.hmdm.launcher.Const;
 import com.hmdm.launcher.R;
 import com.hmdm.launcher.helper.SettingsHelper;
@@ -140,10 +149,30 @@ public class LocationService extends Service {
     private Handler handler = new Handler();
     private GnssStatus.Callback gnssStatusCallback = null;
 
+    // Primary location source: Fused (Wi-Fi/cell/GPS, works indoors, doesn't suffer the silent
+    // stalls of the legacy NETWORK_PROVIDER). Falls back to the LocationManager path above when
+    // Google Play Services is unavailable on the device.
+    private FusedLocationProviderClient fusedLocationClient;
+    private LocationCallback fusedLocationCallback;
+    private boolean usingFused = false;
+
     @Override
     public void onCreate() {
         super.onCreate();
         locationManager = (LocationManager)this.getSystemService(LOCATION_SERVICE);
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        fusedLocationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(@NonNull LocationResult result) {
+                for (Location location : result.getLocations()) {
+                    String provider = location.getProvider() != null ? location.getProvider() : "fused";
+                    RemoteLogger.log(LocationService.this, Const.LOG_INFO, "Fused location update: lat="
+                            + location.getLatitude() + ", lon=" + location.getLongitude() + ", provider=" + provider);
+                    DeviceInfoProvider.storeLastLocation(LocationService.this, location);
+                    ProUtils.processLocation(LocationService.this, location, provider);
+                }
+            }
+        };
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             gnssStatusCallback = new GnssStatus.Callback() {
@@ -238,6 +267,34 @@ public class LocationService extends Service {
         long updateInterval = resolveLocationUpdateInterval();
         RemoteLogger.log(this, Const.LOG_INFO, "Location update interval = " + updateInterval + " ms");
 
+        boolean playServicesAvailable = GoogleApiAvailability.getInstance()
+                .isGooglePlayServicesAvailable(this) == ConnectionResult.SUCCESS;
+
+        if (playServicesAvailable) {
+            if (requestFusedLocationUpdates(updateInterval)) {
+                // Fused is the primary source: make sure the legacy path isn't also registered
+                // (avoids duplicate wakeups/logs).
+                usingFused = true;
+                locationManager.removeUpdates(networkLocationListener);
+                locationManager.removeUpdates(gpsLocationListener);
+                locationManager.removeUpdates(passiveLocationListener);
+                return true;
+            }
+            // Fused registration itself failed unexpectedly: fall through to the legacy path below.
+            RemoteLogger.log(this, Const.LOG_WARN, "Location: Fused registration failed, falling back to LocationManager");
+        } else {
+            RemoteLogger.log(this, Const.LOG_INFO, "Location: Google Play Services unavailable, using LocationManager");
+        }
+
+        usingFused = false;
+        if (fusedLocationClient != null) {
+            try {
+                fusedLocationClient.removeLocationUpdates(fusedLocationCallback);
+            } catch (Exception e) {
+                // Ignore
+            }
+        }
+
         locationManager.removeUpdates(networkLocationListener);
         locationManager.removeUpdates(gpsLocationListener);
         locationManager.removeUpdates(passiveLocationListener);
@@ -265,6 +322,25 @@ public class LocationService extends Service {
         return true;
     }
 
+    // Registers Fused location updates. Priority.PRIORITY_HIGH_ACCURACY prefers GPS when the
+    // configured source is GPS; PRIORITY_BALANCED_POWER_ACCURACY uses Wi-Fi/cell fusion, which
+    // (unlike the legacy NETWORK_PROVIDER) works reliably indoors and doesn't silently stall.
+    @SuppressLint("MissingPermission")
+    private boolean requestFusedLocationUpdates(long updateInterval) {
+        try {
+            fusedLocationClient.removeLocationUpdates(fusedLocationCallback);
+            int priority = updateViaGps ? Priority.PRIORITY_HIGH_ACCURACY : Priority.PRIORITY_BALANCED_POWER_ACCURACY;
+            LocationRequest request = new LocationRequest.Builder(updateInterval)
+                    .setPriority(priority)
+                    .build();
+            fusedLocationClient.requestLocationUpdates(request, fusedLocationCallback, Looper.getMainLooper());
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
 
     @Override
     public void onDestroy() {
@@ -273,6 +349,13 @@ public class LocationService extends Service {
         locationManager.removeUpdates(passiveLocationListener);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             locationManager.unregisterGnssStatusCallback(gnssStatusCallback);
+        }
+        if (fusedLocationClient != null) {
+            try {
+                fusedLocationClient.removeLocationUpdates(fusedLocationCallback);
+            } catch (Exception e) {
+                // Ignore
+            }
         }
         started = false;
 
