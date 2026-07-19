@@ -74,7 +74,7 @@ public class LocationService extends Service {
     private LocationListener gpsLocationListener = new LocationListener() {
         @Override
         public void onLocationChanged(Location location) {
-            RemoteLogger.log(LocationService.this, Const.LOG_VERBOSE, "GPS location update: lat="
+            RemoteLogger.log(LocationService.this, Const.LOG_INFO, "GPS location update: lat="
                     + location.getLatitude() + ", lon=" + location.getLongitude());
             // Capture the fix so it is retained even if getLastKnownLocation() later returns null.
             DeviceInfoProvider.storeLastLocation(LocationService.this, location);
@@ -98,7 +98,7 @@ public class LocationService extends Service {
     private LocationListener networkLocationListener = new LocationListener() {
         @Override
         public void onLocationChanged(Location location) {
-            RemoteLogger.log(LocationService.this, Const.LOG_VERBOSE, "Network location update: lat="
+            RemoteLogger.log(LocationService.this, Const.LOG_INFO, "Network location update: lat="
                     + location.getLatitude() + ", lon=" + location.getLongitude());
             DeviceInfoProvider.storeLastLocation(LocationService.this, location);
             ProUtils.processLocation(LocationService.this, location, LocationManager.NETWORK_PROVIDER);
@@ -210,21 +210,30 @@ public class LocationService extends Service {
     }
 
     private boolean requestLocationUpdates() {
-        if (updateViaGps && (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) !=
-                PackageManager.PERMISSION_GRANTED || !locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER))) {
+        boolean fineGranted = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+        boolean coarseGranted = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+
+        if (updateViaGps && (!fineGranted || !locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER))) {
+            // Diagnostic: the GPS source was requested but can't be used
+            RemoteLogger.log(this, Const.LOG_WARN, "Location: GPS source unavailable (fineGranted=" + fineGranted
+                    + ", gpsEnabled=" + locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                    + ") — using network/passive instead");
             updateViaGps = false;
         }
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) !=
-                PackageManager.PERMISSION_GRANTED) {
-            // No permission, so give up!
+        if (!coarseGranted) {
+            // No permission, so give up! (logged so this isn't a silent early return)
+            RemoteLogger.log(this, Const.LOG_WARN, "Location: ACCESS_COARSE_LOCATION not granted — cannot request updates");
             return false;
         }
 
         boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
         boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
         boolean passiveEnabled = locationManager.isProviderEnabled(LocationManager.PASSIVE_PROVIDER);
-        RemoteLogger.log(this, Const.LOG_VERBOSE,
-                "Request location updates. gps=" + gpsEnabled + ", network=" + networkEnabled + ", passive=" + passiveEnabled);
+        RemoteLogger.log(this, Const.LOG_INFO,
+                "Request location updates. gps=" + gpsEnabled + ", network=" + networkEnabled + ", passive=" + passiveEnabled
+                        + ", fineGranted=" + fineGranted + ", coarseGranted=" + coarseGranted);
 
         long updateInterval = resolveLocationUpdateInterval();
         RemoteLogger.log(this, Const.LOG_INFO, "Location update interval = " + updateInterval + " ms");
@@ -293,6 +302,9 @@ public class LocationService extends Service {
         } else {
             updateViaGps = false;
         }
+        RemoteLogger.log(this, Const.LOG_INFO, "LocationService onStartCommand: action="
+                + (inputIntent != null ? inputIntent.getAction() : "null") + ", updateViaGps=" + updateViaGps);
+
         // Always (re)register: this picks up provider changes (e.g. enabling High Accuracy) and
         // config-driven restarts, which the previous "only when !started" gate missed.
         if (!requestLocationUpdates()) {

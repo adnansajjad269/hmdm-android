@@ -1468,8 +1468,10 @@ public class MainActivity
 
     private void startLocationService() {
         ServerConfig config = settingsHelper.getConfig();
+        String action = config.getRequestUpdates() != null ? config.getRequestUpdates() : LocationService.ACTION_STOP;
+        RemoteLogger.log(this, Const.LOG_INFO, "Starting LocationService action=" + action);
         Intent intent = new Intent(this, LocationService.class);
-        intent.setAction(config.getRequestUpdates() != null ? config.getRequestUpdates() : LocationService.ACTION_STOP);
+        intent.setAction(action);
         startService(intent);
     }
 
