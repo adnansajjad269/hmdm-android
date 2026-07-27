@@ -53,7 +53,9 @@ import androidx.annotation.RequiresApi;
 
 import com.hmdm.launcher.BuildConfig;
 import com.hmdm.launcher.Const;
+import com.hmdm.launcher.helper.SettingsHelper;
 import com.hmdm.launcher.json.Action;
+import com.hmdm.launcher.json.Application;
 import com.hmdm.launcher.json.ServerConfig;
 import com.hmdm.launcher.ui.MainActivity;
 
@@ -97,6 +99,31 @@ public class Utils {
             "com.freekiosk"
     };
 
+    // Returns the distinct packages configured to show an icon on the dashboard (the same set
+    // AppShortcutManager.getConfiguredApps() populates the launcher grid from), so the lock task
+    // whitelist can stay in sync with whatever the operator can actually tap on the dashboard.
+    // Excludes TYPE_WEB/TYPE_INTENT entries, which don't target a distinct installed package the
+    // same way TYPE_APP does.
+    private static List<String> getDashboardAppPackages(Context context) {
+        List<String> pkgs = new ArrayList<String>();
+        try {
+            ServerConfig config = SettingsHelper.getInstance(context).getConfig();
+            if (config != null && config.getApplications() != null) {
+                for (Application app : config.getApplications()) {
+                    if (app.isShowIcon() && !app.isRemove()
+                            && (app.getType() == null || app.getType().equals(Application.TYPE_APP))
+                            && app.getPkg() != null && !app.getPkg().isEmpty()
+                            && !pkgs.contains(app.getPkg())) {
+                        pkgs.add(app.getPkg());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(Const.LOG_TAG, "LockTaskWhitelist: failed to read dashboard apps", e);
+        }
+        return pkgs;
+    }
+
     public static void applyLockTaskWhitelist(Context context) {
         if (!isDeviceOwner(context)) {
             Log.i(Const.LOG_TAG, "LockTaskWhitelist: not device owner, skipping");
@@ -106,7 +133,9 @@ public class Utils {
             DevicePolicyManager dpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
             ComponentName admin = LegacyUtils.getAdminComponentName(context);
 
-            // Merge: own package + extras + anything already whitelisted
+            // Desired set: own package + the static extras (e.g. FreeKiosk, kept as a safety net
+            // independent of dashboard config) + every app currently configured to show an icon
+            // on the dashboard, so the operator can actually launch what they see.
             List<String> packages = new ArrayList<String>();
             packages.add(context.getPackageName());
             for (String pkg : LOCK_TASK_EXTRA_PACKAGES) {
@@ -114,31 +143,26 @@ public class Utils {
                     packages.add(pkg);
                 }
             }
-            String[] existing = dpm.getLockTaskPackages(admin);
-            boolean allPresent = true;
-            if (existing != null) {
-                java.util.List<String> existingList = java.util.Arrays.asList(existing);
-                for (String pkg : packages) {
-                    if (!existingList.contains(pkg)) {
-                        allPresent = false;
-                    }
+            for (String pkg : getDashboardAppPackages(context)) {
+                if (!packages.contains(pkg)) {
+                    packages.add(pkg);
                 }
-                for (String pkg : existing) {
-                    if (!packages.contains(pkg)) {
-                        packages.add(pkg);
-                    }
-                }
-            } else {
-                allPresent = false;
             }
 
-            if (allPresent) {
-                // Already whitelisted; nothing to do (keeps onResume calls quiet)
+            // Full replace-if-different (not merge): a dashboard app that's since been removed
+            // from config must also be REVOKED from the lock task whitelist, not left whitelisted
+            // forever. setLockTaskPackages() itself is a full replace, which is exactly right here.
+            String[] existing = dpm.getLockTaskPackages(admin);
+            boolean same = existing != null && existing.length == packages.size()
+                    && java.util.Arrays.asList(existing).containsAll(packages);
+            if (same) {
+                // Already correct; nothing to do (keeps onResume/config-poll calls quiet)
                 return;
             }
 
             dpm.setLockTaskPackages(admin, packages.toArray(new String[0]));
             Log.i(Const.LOG_TAG, "LockTaskWhitelist: applied " + packages);
+            RemoteLogger.log(context, Const.LOG_INFO, "Lock task whitelist updated: " + packages);
         } catch (Exception e) {
             // Never let policy application break launcher startup
             Log.e(Const.LOG_TAG, "LockTaskWhitelist: failed to apply", e);

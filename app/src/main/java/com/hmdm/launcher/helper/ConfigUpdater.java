@@ -461,6 +461,11 @@ public class ConfigUpdater {
                 }
                 Utils.setProxy(context, proxyUrl);
             }
+
+            // Keep the lock-task whitelist in sync with the dashboard app list on every config
+            // poll, not just at launcher startup, so remotely adding/removing a dashboard app
+            // takes effect without requiring the launcher to restart.
+            Utils.applyLockTaskWhitelist(context);
         }
 
         if (uiNotifier != null) {
