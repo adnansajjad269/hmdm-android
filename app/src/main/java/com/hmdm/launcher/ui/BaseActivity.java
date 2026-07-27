@@ -372,6 +372,19 @@ public class BaseActivity extends AppCompatActivity {
     }
 
     @SuppressLint( { "MissingPermission" } )
+    // Masks an identifier (IMEI, serial number) with asterisks of the same length, so the info
+    // dialog shows the field is present without exposing the actual value.
+    private static String maskId(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        StringBuilder masked = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            masked.append('*');
+        }
+        return masked.toString();
+    }
+
     protected void createAndShowInfoDialog() {
         dismissDialog(deviceInfoDialog);
         deviceInfoDialog = new Dialog( this );
@@ -385,7 +398,7 @@ public class BaseActivity extends AppCompatActivity {
 
         deviceInfoDialog.setContentView( dialogDeviceInfoBinding.getRoot() );
 
-        dialogDeviceInfoBinding.setSerialNumber(DeviceInfoProvider.getSerialNumber());
+        dialogDeviceInfoBinding.setSerialNumber(maskId(DeviceInfoProvider.getSerialNumber()));
 
         SettingsHelper settingsHelper = SettingsHelper.getInstance(this);
 
@@ -399,7 +412,7 @@ public class BaseActivity extends AppCompatActivity {
         if (imei == null || imei.equals("")) {
             imei = settingsHelper.getConfig() != null ? settingsHelper.getConfig().getImei() : "";
         }
-        dialogDeviceInfoBinding.setImei(imei);
+        dialogDeviceInfoBinding.setImei(maskId(imei));
 
         String hideIdsStr = settingsHelper.getAppPreference(getPackageName(), "hide_ids");
         if ("1".equals(hideIdsStr) || "true".equalsIgnoreCase(hideIdsStr)) {
